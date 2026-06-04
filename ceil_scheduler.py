@@ -82,13 +82,17 @@ def build_preference_matrix(data: dict, idx: dict) -> dict:
     return pref_cost
 
 def get_allowed_timeslots(group: dict, idx: dict) -> list:
-    day_to_idx = {d: i for i, d in enumerate(idx["days"])}
+    """Calculates all possible open timeslot choices for a group. 
+    
+    Unconstrained by default across all active working days, bound 
+    strictly by structural hours and individual teacher availability.
+    """
     allowed = []
-    for day_str in group.get("allowed_days", idx["days"]):
-        if day_str in day_to_idx:
-            di = day_to_idx[day_str]
-            for s in group.get("allowed_slots", idx["slots"]):
-                allowed.append((di, s))
+    # 🟢 Completely bypass group.get("allowed_days"). Open up all system days.
+    for di in range(idx["num_days"]):
+        # Maintain allowed_slots so track rules (like Evening Shifts) still bind properly
+        for s in group.get("allowed_slots", idx["slots"]):
+            allowed.append((di, s))
     return allowed
 
 def build_model(data: dict, idx: dict, pref_cost: dict, weights: dict) -> tuple:

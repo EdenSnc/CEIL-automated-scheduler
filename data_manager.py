@@ -212,9 +212,7 @@ class ScheduleDataManager:
 
     def export_to_excel(self, filepath: str) -> None:
         try:
-            import pandas as pd
-            from collections import defaultdict
-            from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
+            from openpyxl.styles import Font, PatternFill, Border, Side
             
             with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
                 schedule = self.data.get("schedule", [])
@@ -229,20 +227,25 @@ class ScheduleDataManager:
                     
                     for item in schedule:
                         d, s, r, g, t = item.get("day", ""), item.get("slot", ""), item.get("room", ""), item.get("group", ""), item.get("teacher", "")
-                        
-                        # Kept clean without language appending as colors are removed
                         entry = f"[{r}] {g} ({t})"
                         current = grid_df.at[s, d]
-                        grid_df.at[s, d] = (current + "\n\n" + entry) if current else entry
+                        grid_df.at[s, d] = (current + "\n" + entry) if current else entry
                     
                     grid_df.to_excel(writer, sheet_name="Grid View")
-                    
+                    worksheet = writer.sheets["Grid View"]
+                    for row in worksheet.iter_rows():
+                        for cell in row:
+                            cell.alignment = Alignment(wrap_text=True, vertical='top')
+                    for col in worksheet.columns:
+                        worksheet.column_dimensions[col[0].column_letter].width = 32
+
                     # 2. GENERATE ROOM VIEW
                     rooms = sorted(list(set(item.get("room", "") for item in schedule)))
                     room_cols = []
                     for r in rooms:
                         room_cols.extend([f"{r} - Language", f"{r} - Group", f"{r} - Teacher"])
                     
+                    from collections import defaultdict
                     row_groups = defaultdict(list)
                     for item in schedule:
                         row_groups[(item.get("day", ""), item.get("slot", ""))].append(item)
@@ -252,13 +255,7 @@ class ScheduleDataManager:
                         row_dict = {"Day": d, "Time": s}
                         for item in items:
                             r = item.get("room", "")
-                            lang_attr = item.get("language")
-                            
-                            if lang_attr is None or str(lang_attr).strip().lower() in ("none", ""):
-                                row_dict[f"{r} - Language"] = ""
-                            else:
-                                row_dict[f"{r} - Language"] = str(lang_attr)
-                                
+                            row_dict[f"{r} - Language"] = item.get("language", "English")
                             row_dict[f"{r} - Group"] = item.get("group", "")
                             row_dict[f"{r} - Teacher"] = item.get("teacher", "")
                         rows_list.append(row_dict)
@@ -266,119 +263,90 @@ class ScheduleDataManager:
                     pd.DataFrame(rows_list, columns=["Day", "Time"] + room_cols).to_excel(writer, sheet_name="Room View", index=False)
                     pd.DataFrame(schedule).to_excel(writer, sheet_name="Raw Schedule", index=False)
                     
-                # 3. GENERATE ENTITY VIEWS
-                pd.DataFrame(self.data.get("teachers", [])).to_excel(writer, sheet_name="Teachers", index=False)
-                pd.DataFrame(self.data.get("groups", [])).to_excel(writer, sheet_name="Groups", index=False)
+                # 3. GENERATE MASTER ENTITY VIEWS (Scrub constraints completely)
+                teachers_copy = copy.deepcopy(self.data.get("teachers", []))
+                for t in teachers_copy:
+                    t.pop("allowed_days", None)  # 🟢 Drop completely from sheet exports
+                    if "allowed_slots" in t and isinstance(t["allowed_slots"], list):
+                        t["allowed_slots"] = ", ".join(str(s) for s in t["allowed_slots"])
+                    if "preferences" in t:
+                        t["preferences"] = str(t["preferences"])
+                pd.DataFrame(teachers_copy).to_excel(writer, sheet_name="Teachers", index=False)
+
+                groups_copy = copy.deepcopy(self.data.get("groups", []))
+                for g in groups_copy:
+                    g.pop("allowed_days", None)  # 🟢 Drop completely from sheet exports
+                    if "allowed_slots" in g and isinstance(g["allowed_slots"], list):
+                        g["allowed_slots"] = ", ".join(str(s) for s in g["allowed_slots"])
+                pd.DataFrame(groups_copy).to_excel(writer, sheet_name="Groups", index=False)
+                
                 pd.DataFrame(self.data.get("rooms", [])).to_excel(writer, sheet_name="Rooms", index=False)
 
-                # ==========================================
-                # --- POST-PROCESSING: ADVANCED STYLING ---
-                # ==========================================
+                # --- STRUCTURAL INTERFACE POST-PROCESSING ---
                 workbook = writer.book
-                
-                # System dictionary for language colors (Hex without '#')
-                lang_colors = {
-                    "english": "C0DAFE",
-                    "french": "FB70BF",
-                    "spanish": "FFB554",
-                    "italian": "52E084",
-                    "turkish": "C192F4",
-                    "german": "8B7251",
-                    "swedish": "86F5DD",
-                    "japanese": "F9CBCB",
-                    "chinese": "F97171",
-                    "russian": "6E6EFB"
-                }
-                
-                # Global Styling Objects
                 global_font = Font(name="Segoe UI", size=11)
                 header_font = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
                 header_fill = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
-                empty_fill  = PatternFill(start_color="F1F5F9", end_color="F1F5F9", fill_type="solid")
+                empty_fill  = PatternFill(start_color="F8FAFC", end_color="F8FAFC", fill_type="solid")
                 
                 border_side = Side(style="thin", color="CBD5E1")
                 cell_border = Border(left=border_side, right=border_side, top=border_side, bottom=border_side)
                 
-                top_align = Alignment(vertical="top", wrap_text=True)
-
-                # Apply styling to every sheet
                 for sheet_name in workbook.sheetnames:
                     worksheet = workbook[sheet_name]
-                    
-                    # Dynamically detect columns for conditional row coloring
-                    header_row = [str(cell.value).lower().strip() if cell.value else "" for cell in worksheet[1]]
-                    lang_col_idx = header_row.index("language") if "language" in header_row else None
-                    level_col_idx = header_row.index("level") if "level" in header_row else None
-                    
                     for row_idx, row in enumerate(worksheet.iter_rows(), start=1):
                         is_header = (row_idx == 1)
-                        
-                        # Dynamic Row Heights
                         if is_header:
                             worksheet.row_dimensions[row_idx].height = 26
                         else:
-                            # Auto-adjust handles line breaks perfectly, enforce 20pt on single lines
                             has_newline = any(str(cell.value).find('\n') != -1 for cell in row if cell.value)
                             if not has_newline:
                                 worksheet.row_dimensions[row_idx].height = 20
                                 
-                        # Determine Row Background Color
-                        row_fill = empty_fill
-                        if not is_header:
-                            if sheet_name == "Raw Schedule" and lang_col_idx is not None:
-                                lang_val = str(row[lang_col_idx].value).lower() if row[lang_col_idx].value else ""
-                                for lang, hex_code in lang_colors.items():
-                                    if lang in lang_val:
-                                        row_fill = PatternFill(start_color=hex_code, end_color=hex_code, fill_type="solid")
-                                        break
-                                        
-                            elif sheet_name == "Groups" and level_col_idx is not None:
-                                level_val = str(row[level_col_idx].value).strip().upper() if row[level_col_idx].value else ""
-                                if level_val.startswith("A"):
-                                    row_fill = PatternFill(start_color="A7FCB4", end_color="A7FCB4", fill_type="solid") # Green
-                                elif level_val.startswith("B"):
-                                    row_fill = PatternFill(start_color="A4C5FD", end_color="A4C5FD", fill_type="solid") # Blue
-                                elif level_val.startswith("C"):
-                                    row_fill = PatternFill(start_color="D1A9FF", end_color="D1A9FF", fill_type="solid") # Purple
-                        
-                        # Apply Cell Level Formats
                         for cell in row:
-                            cell.alignment = top_align
-                            has_text = cell.value is not None and str(cell.value).strip() != ""
-                            
-                            # Global cell borders
-                            if has_text:
-                                cell.border = cell_border
-                                
                             if is_header:
                                 cell.font = header_font
                                 cell.fill = header_fill
                             else:
                                 cell.font = global_font
-                                cell.fill = row_fill
-
-                    # Dynamic Column Width Padding
-                    for col in worksheet.columns:
-                        max_length = 0
-                        col_letter = col[0].column_letter
-                        for cell in col:
-                            if cell.value:
-                                lines = str(cell.value).split('\n')
-                                for line in lines:
-                                    if len(line) > max_length:
-                                        max_length = len(line)
-                        
-                        # Apply safe width (+4 padding)
-                        worksheet.column_dimensions[col_letter].width = max_length + 4
+                                cell.fill = empty_fill
+                            cell.border = cell_border
+                            
+                    if sheet_name != "Grid View":
+                        for col in worksheet.columns:
+                            max_length = 0
+                            col_letter = col[0].column_letter
+                            for cell in col:
+                                if cell.value:
+                                    lines = str(cell.value).split('\n')
+                                    for line in lines:
+                                        if len(line) > max_length:
+                                            max_length = len(line)
+                            worksheet.column_dimensions[col_letter].width = max(max_length + 4, 12)
 
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).error(f"Excel export failed: {e}")
+            logger.error(f"Excel export configuration crashed: {e}")
             raise
-            
+
     def import_master_data_from_excel(self, filepath: str) -> None:
         try:
             xls = pd.ExcelFile(filepath)
+            
+            # 🟢 RECONCILE TIMETABLE ROUND-TRIP OVERRIDES
+            if "Raw Schedule" in xls.sheet_names:
+                sched_df = pd.read_excel(xls, "Raw Schedule")
+                sched_df = sched_df.where(pd.notnull(sched_df), None)
+                raw_assignments = sched_df.to_dict(orient="records")
+                
+                clean_assignments = []
+                for a in raw_assignments:
+                    clean_a = {k: v for k, v in a.items() if v is not None}
+                    if clean_a:
+                        clean_assignments.append(clean_a)
+                
+                self.data["schedule"] = clean_assignments
+                logger.info(f"[Import Pipeline] Successfully synchronized {len(clean_assignments)} rows into active schedule collection.")
+
             def parse_target_sheet(sheet_name):
                 if sheet_name in xls.sheet_names:
                     df = pd.read_excel(xls, sheet_name)
@@ -392,12 +360,28 @@ class ScheduleDataManager:
                             raw_language = rec.get("language")
                             clean_r["language"] = "" if raw_language is None else str(raw_language)
                         
-                        for key in ["preferences", "allowed_days", "allowed_slots"]:
-                            if key in clean_r and isinstance(clean_r[key], str):
-                                try:
-                                    clean_r[key] = ast.literal_eval(clean_r[key])
-                                except Exception:
-                                    pass 
+                        # 🛡️ DEFENSIVE GUARD: Ensure allowed_days never pollutes the DB again
+                        clean_r.pop("allowed_days", None)
+                        
+                        if "allowed_slots" in clean_r:
+                            val_str = str(clean_r["allowed_slots"]).replace("[", "").replace("]", "").replace("'", "")
+                            if val_str.strip() == "":
+                                clean_r["allowed_slots"] = []
+                            else:
+                                tokens = [t.strip() for t in val_str.split(",")]
+                                int_slots = []
+                                for t in tokens:
+                                    try:
+                                        int_slots.append(int(float(t)))
+                                    except ValueError:
+                                        pass
+                                clean_r["allowed_slots"] = int_slots
+
+                        if "preferences" in clean_r and isinstance(clean_r["preferences"], str):
+                            try:
+                                clean_r["preferences"] = ast.literal_eval(clean_r["preferences"])
+                            except Exception:
+                                pass 
                         cleaned_records.append(clean_r)
                     return cleaned_records
                 return []
@@ -406,11 +390,18 @@ class ScheduleDataManager:
             groups = parse_target_sheet("Groups")
             rooms = parse_target_sheet("Rooms")
             
-            if teachers: self.data["teachers"] = teachers
-            if groups: self.data["groups"] = groups
-            if rooms: self.data["rooms"] = rooms
+            # Sanitize internal running states
+            if teachers:
+                for t in teachers: t.pop("allowed_days", None)
+                self.data["teachers"] = teachers
+            if groups:
+                for g in groups: g.pop("allowed_days", None)
+                self.data["groups"] = groups
+            if rooms: 
+                self.data["rooms"] = rooms
             
             self.save_to_disk()
+            logger.info("[Import Pipeline] Complete workbook synchronization routine executed successfully.")
         except Exception as e:
             logger.error(f"Excel import failed: {e}")
             raise

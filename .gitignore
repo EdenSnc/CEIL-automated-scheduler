@@ -8,3 +8,5 @@ build/
 prompt2pickUpFrom.txt
 codebase_context.txt
 *.zip
+*.db-shm
+*.db-wal
