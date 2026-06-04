@@ -15,11 +15,13 @@ class SchedulingSystemController:
 
     def bind_signals(self) -> None:
         self.view.weight_changed.connect(self.model.update_weight)
-        self.view.run_optimization_triggered.connect(self.launch_solver_thread)
+        
+        # Now passing the time out limit directly from the UI button emission
+        self.view.run_optimization_triggered.connect(self.launch_solver_thread) 
+        
         self.view.export_excel_triggered.connect(self.handle_excel_export)
         self.view.import_excel_triggered.connect(self.handle_excel_import)
         
-        # Connect the new reset button
         self.view.btn_reset_weights.clicked.connect(self.handle_reset_weights)
 
         self.view.teacher_tab.preferences_requested.connect(self.handle_teacher_preferences)
@@ -36,8 +38,23 @@ class SchedulingSystemController:
         self.view.room_tab.delete_requested.connect(lambda entity_id: self.delete_entity_handler("rooms", entity_id))
 
     def handle_reset_weights(self) -> None:
+        # 1. Reset the penalty weights in the database model
         self.model.reset_weights()
+        
+        # 2. Reset the execution timeout in the model metadata to default (60)
+        if "metadata" not in self.model.data:
+            self.model.data["metadata"] = {}
+        self.model.data["metadata"]["solver_timeout"] = 45
+        self.model.save_to_disk()
+        
+        # 3. Synchronize the UI components
         self.view.set_weights_ui_values(self.model.data.get("weights", {}))
+        self.view.time_slider.setValue(45)  # <-- This line fixes your bug!
+        
+        self.view.append_log_message(
+
+            "[System Activity] Reset all optimization penalty coefficients and solver execution limits to system defaults."
+        )
 
     def refresh_ui_contexts(self) -> None:
         teacher_lookup_map = {t["id"]: t["name"] for t in self.model.data["teachers"]}
@@ -48,14 +65,11 @@ class SchedulingSystemController:
         self.view.room_tab.render_data(self.model.data["rooms"])
 
         if self.model.data.get("schedule"):
-            # --- Data Pipeline Sync: Live Reactivity Fix ---
-            # Build live mapping: {group_name: current_language}
             live_group_langs = {}
             for g in self.model.data.get("groups", []):
                 g_name = g.get("name", g.get("id"))
                 live_group_langs[g_name] = g.get("language", "")
 
-            # Mutate cached schedule items to mirror live group modifications
             for sched_item in self.model.data["schedule"]:
                 grp_name = sched_item.get("group")
                 if grp_name in live_group_langs:
@@ -63,7 +77,12 @@ class SchedulingSystemController:
 
             self.view.display_schedule(self.model.data["schedule"])
 
+        # Populate the weights grid
         self.view.set_weights_ui_values(self.model.data.get("weights", {}))
+        
+        # Populate the execution time slider state
+        timeout = self.model.data.get("metadata", {}).get("solver_timeout", 60)
+        self.view.time_slider.setValue(timeout)
 
     def add_entity_handler(self, collection: str, data: dict) -> None:
         self.model.add_entity(collection, data)
@@ -73,7 +92,7 @@ class SchedulingSystemController:
         target_name = data.get("name", data.get("id", "New entry"))
         collection_label = collection.rstrip("s").capitalize()
         self.view.append_log_message(
-            f"[System Activity] Added {collection_label} record '{target_name}' and saved the updated data to ceil_data.json."
+            f"[System Activity] Added {collection_label} record '{target_name}' and saved the updated data to the internal database."
         )
 
     def update_entity_handler(self, collection: str, index: int, data: dict) -> None:
@@ -84,7 +103,7 @@ class SchedulingSystemController:
         target_name = data.get("name", data.get("id", f"Index {index}"))
         collection_label = collection.rstrip("s").capitalize()
         self.view.append_log_message(
-            f"[System Activity] Updated {collection_label} record '{target_name}' and saved the changes to ceil_data.json."
+            f"[System Activity] Updated {collection_label} record '{target_name}' and saved the changes."
         )
 
     def delete_entity_handler(self, collection: str, index: int) -> None:
@@ -101,16 +120,21 @@ class SchedulingSystemController:
             target_name = deleted_item.get("name", deleted_item.get("id", target_name))
         collection_label = collection.rstrip("s").capitalize()
         self.view.append_log_message(
-            f"[System Activity] Deleted {collection_label} record '{target_name}' and saved the removal to ceil_data.json."
+            f"[System Activity] Deleted {collection_label} record '{target_name}'."
         )
 
     def handle_teacher_preferences(self, index: int, name: str, current_prefs: dict) -> None:
-        dialog = TeacherPreferencesDialog(name, current_prefs, self.view)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            updated_matrix = dialog.get_preferences()
-            self.model.data["teachers"][index]["preferences"] = updated_matrix
-            self.model.save_to_disk()
-            self.refresh_ui_contexts()
+            dialog = TeacherPreferencesDialog(name, current_prefs, self.view)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                updated_matrix = dialog.get_preferences()
+                self.model.data["teachers"][index]["preferences"] = updated_matrix
+                self.model.save_to_disk()
+                self.refresh_ui_contexts()
+                
+                # 🟢 PUSH LIVE CONFIRMATION INTO SYSTEM TRACE LOG PANEL & TERMINAL CONSOLE
+                self.view.append_log_message(
+                    f"[System Activity] Successfully updated and saved availability matrix preferences for teacher: '{name}' (Index: {index})."
+                )
 
     def handle_excel_export(self, filepath: str) -> None:
         try:
@@ -127,15 +151,21 @@ class SchedulingSystemController:
         except Exception as e:
             QMessageBox.critical(self.view, "Import Failed", f"Failed to parse target template:\n{str(e)}")
 
-    def launch_solver_thread(self) -> None:
+    def launch_solver_thread(self, timeout: int) -> None:
+        # Update the metadata in the model before sending to solver
+        if "metadata" not in self.model.data:
+            self.model.data["metadata"] = {}
+        self.model.data["metadata"]["solver_timeout"] = timeout
+        self.model.save_to_disk()
+        
         # Lock Engine Controls & Navigation
         self.view.btn_solve.setEnabled(False)
         self.view.weights_box.setEnabled(False)
         self.view.tabs.setEnabled(False)
+        self.view.time_slider.setEnabled(False)
         for btn in self.view.day_buttons:
             btn.setEnabled(False)
         
-        # Lock CRUD Operations & File I/O
         self.view.teacher_tab.setEnabled(False)
         self.view.group_tab.setEnabled(False)
         self.view.room_tab.setEnabled(False)
@@ -145,19 +175,17 @@ class SchedulingSystemController:
         self.view.status_dot.setStyleSheet("color: #D97706;") 
         
         self.solver_worker = OptimizationSolverWorker(self.model.data)
-
-        # --- Live trace pipeline ---
+        
         self.view.debug_box.setChecked(True)
         self.solver_worker.log_emitted.connect(self.view.append_log_message)
-
         self.solver_worker.calculation_finished.connect(self.on_solver_success)
         self.solver_worker.calculation_failed.connect(self.on_solver_failure)
         self.solver_worker.start()
 
     def on_solver_success(self, runtime_payload: Dict[str, Any]) -> None:
-        # Unlock all UI components & Navigation
         self.view.btn_solve.setEnabled(True)
         self.view.weights_box.setEnabled(True)
+        self.view.time_slider.setEnabled(True)
         self.view.teacher_tab.setEnabled(True)
         self.view.group_tab.setEnabled(True)
         self.view.room_tab.setEnabled(True)
@@ -173,9 +201,8 @@ class SchedulingSystemController:
             generated_schedule = runtime_payload.get("schedule", [])
             self.model.data["schedule"] = generated_schedule
             
-            # Save data and push a manual trace directly to the UI Console
             self.model.save_to_disk()
-            self.view.append_log_message("[System] Optimization configurations successfully written to disk JSON storage.")
+            self.view.append_log_message("[System] Optimization configurations successfully written to disk storage.")
             
             self.view.display_schedule(generated_schedule)
             status_bar = self.view.statusBar()
@@ -200,9 +227,9 @@ class SchedulingSystemController:
             msg_box.exec()
 
     def on_solver_failure(self, error_message: str) -> None:
-        # Unlock all UI components & Navigation
         self.view.btn_solve.setEnabled(True)
         self.view.weights_box.setEnabled(True)
+        self.view.time_slider.setEnabled(True)
         self.view.teacher_tab.setEnabled(True)
         self.view.group_tab.setEnabled(True)
         self.view.room_tab.setEnabled(True)

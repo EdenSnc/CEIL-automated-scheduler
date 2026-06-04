@@ -101,11 +101,11 @@ def build_model(data: dict, idx: dict, pref_cost: dict, weights: dict) -> tuple:
     w_fairness = weights.get("W_FAIRNESS", 15)
     w_room_change = weights.get("W_ROOM_CHANGE", 10)
     w_cognitive = weights.get("W_COGNITIVE", 5)
-    w_cluster = weights.get("W_SAME_DAY_CLUSTER", 80)
 
     days, slots = idx["days"], idx["slots"]
     num_days, num_slots = idx["num_days"], idx["num_slots"]
-    groups, room_list = idx["groups"], idx["room_list"]
+    groups = idx["groups"]
+    room_list = idx["room_list"]
     special_rooms = set(idx["special_room_ids"])
     normal_rooms = [r for r in room_list if r not in special_rooms]
     group_list, teacher_list = idx["group_list"], idx["teacher_list"]
@@ -329,30 +329,17 @@ def build_model(data: dict, idx: dict, pref_cost: dict, weights: dict) -> tuple:
         target_days = 4 if req_sessions >= 4 else req_sessions
         model.Add(num_days_used == target_days)
 
-    # 11. Day Clustering
-    cluster_penalty_terms = []
+    # 11. Day Clustering (HARD CONSTRAINT)
     for gid in group_list:
-        grp = groups[gid]
-        # Bypassed for SI groups because packing 6 sessions into 4 days mathematically requires clustering
-        if grp.get("is_si", False) or grp.get("is_ielts", False) or grp.get("is_evening", False) or grp.get("sessions_per_week", 2) != 2:
-            continue
-
         for d in range(num_days):
             day_session_vars = [x[gid][rid][(dd, s)] for rid in x[gid] for (dd, s) in x[gid][rid] if dd == d]
-            if not day_session_vars: continue
-
-            sessions_on_day = model.NewIntVar(0, 2, f"sess_on_day__{gid}__d{d}")
-            model.Add(sessions_on_day == sum(day_session_vars))
-
-            cluster_excess = model.NewIntVar(0, 2, f"cluster_excess__{gid}__d{d}")
-            model.Add(cluster_excess >= sessions_on_day - 1)
-            model.Add(cluster_excess >= 0)
-            cluster_penalty_terms.append(w_cluster * cluster_excess)
+            if day_session_vars:
+                model.Add(sum(day_session_vars) <= 1)
 
     all_penalty_terms = (
         gap_penalty_terms + pref_penalty_terms + load_penalty_terms +
         [w_fairness * max_teacher_penalty] + room_change_terms +
-        cogn_penalty_terms + cluster_penalty_terms
+        cogn_penalty_terms
     )
 
     model.Minimize(cp_model.LinearExpr.Sum(all_penalty_terms))
@@ -455,7 +442,10 @@ def run_solver(input_data: dict, penalty_weights: dict, log_cb=None) -> dict:
         pref_cost = build_preference_matrix(input_data, idx)
         
         model, solver_vars = build_model(input_data, idx, pref_cost, penalty_weights)
-        solver, status = solve(model, time_limit_s=60, log_cb=log_cb)
+        
+        # --- Fetch the timeout limit dynamically from metadata ---
+        time_limit = input_data.get("metadata", {}).get("solver_timeout", 60)
+        solver, status = solve(model, time_limit_s=time_limit, log_cb=log_cb)
         
         if status in ("OPTIMAL", "FEASIBLE"):
             return {

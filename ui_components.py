@@ -2,6 +2,7 @@
 import os
 import hashlib
 import logging
+import re
 from typing import List, Dict, Any
 
 from PyQt6.QtWidgets import (
@@ -16,20 +17,17 @@ from PyQt6.QtGui import QIcon, QColor, QPainter, QPixmap, QBrush
 
 logger = logging.getLogger(__name__)
 
-# ── Supported languages (used in dropdowns AND colour lookup) ─────────────────
 SUPPORTED_LANGUAGES = [
     "English", "French", "Spanish", "Italian",
     "German", "Swedish", "Japanese", "Chinese", "Turkish", "Russian"
 ]
 
-# Keyed by the lowercase language name for O(1) lookup
-# Format: (Fill_Hex, Border_Hex, Optional_Text_Hex)
 LANGUAGE_COLORS: Dict[str, tuple] = {
     "english":  ("#C0DAFE", "#71B1FA"),
     "french":   ("#FB70BF", "#FF2395"),
     "spanish":  ("#FFB554", "#FF9B30"),
     "italian":  ("#52E084", "#16A34A"),
-    "german":   ("#8B7251", "#74450F"),
+    "german":   ("#907C63", "#74450F"),
     "swedish":  ("#86F5DD", "#5EEAD4"),
     "japanese": ("#F9CBCB", "#FCA5A5"),
     "chinese":  ("#F97171", "#FB2424"),
@@ -42,8 +40,6 @@ def apply_ceil_icon(window: QWidget) -> None:
     if os.path.exists(icon_filename):
         window.setWindowIcon(QIcon(icon_filename))
 
-
-# ── FIX: QObject MUST be listed first so PyQt6's metaclass processes pyqtSignal
 class QLogSignalHandler(QObject, logging.Handler):
     log_emitted = pyqtSignal(str)
 
@@ -57,7 +53,6 @@ class QLogSignalHandler(QObject, logging.Handler):
             print(f"🔬 PROBE LOG: Emitting -> {msg}")
             self.log_emitted.emit(msg)
         except Exception as e:
-            # 🟢 ADD THIS LINE TO PROBE
             print(f"💥 PROBE LOG CRASH: {e}")
 
 
@@ -74,12 +69,9 @@ class ScheduleCardWidget(QFrame):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(4)
 
-        # Clean incoming language string
         lang = str(item_data.get("language", "")).strip().lower()
+        self.text_color = "#0F172A" 
 
-        self.text_color = "#0F172A"  # Default text color
-
-        # Intercept missing/empty/none languages
         if not lang or lang=="None" or lang=="none": 
             self.bg_color = "#DBDCDC"
             self.border_color = "#818181"
@@ -90,7 +82,6 @@ class ScheduleCardWidget(QFrame):
             if len(color_data) > 2:
                 self.text_color = color_data[2]
         else:
-            # Fallback hash for unknown languages
             hashed = hash(lang)
             hue = hashed % 360
             self.bg_color = QColor.fromHsl(hue, 150, 230).name()
@@ -120,7 +111,6 @@ class ScheduleCardWidget(QFrame):
         layout.addWidget(self.lbl_teacher)
         layout.addWidget(self.lbl_room)
 
-        # Explicitly target ScheduleCardWidget to protect against global stylesheet cascading
         self.setStyleSheet(
             f"ScheduleCardWidget {{ background-color: {self.bg_color}; "
             f"border: 1px solid {self.border_color}; border-radius: 6px; }}"
@@ -152,7 +142,6 @@ class ScheduleCardWidget(QFrame):
             self.lbl_room.setStyleSheet(
                 "background-color: rgba(255,255,255,0.8); border-radius: 4px; "
                 "padding: 3px 6px; font-size: 10px; color: #1E293B; font-weight: bold; border: none;")
-
 
 class CellContainerWidget(QWidget):
     def __init__(self):
@@ -187,7 +176,7 @@ class CellContainerWidget(QWidget):
 
 class SchedulingStudioMainWindow(QMainWindow):
     weight_changed = pyqtSignal(str, int)
-    run_optimization_triggered = pyqtSignal()
+    run_optimization_triggered = pyqtSignal(int)  # Now Passes Max Time 
     export_excel_triggered = pyqtSignal(str)
     import_excel_triggered = pyqtSignal(str)
 
@@ -287,7 +276,6 @@ class SchedulingStudioMainWindow(QMainWindow):
 
         self.sliders = {}
         parameters = [
-            ("W_SAME_DAY_CLUSTER", "Same-Day Clustering", "Penalizes standard groups having 2 classes on the same day."),
             ("W_PREFERENCE", "Teacher Preferences", "Reward/Penalty multiplier for shift availability."),
             ("W_GAP", "Avoid Trapped Gaps", "Penalizes unallocated blocks between active sessions."),
             ("W_LOAD_BALANCE", "Normalize Workload", "Balances assignments to avoid heavy vs empty days."),
@@ -354,17 +342,41 @@ class SchedulingStudioMainWindow(QMainWindow):
         weights_main_layout.addWidget(scroll_area)
         dash_layout.addWidget(self.weights_box)
 
+        # ── SOLVER CONTROL CENTER ─────────────────────────────────────────────
         solver_box = QGroupBox("Solver Control Center")
-        solver_layout = QHBoxLayout(solver_box)
+        solver_layout = QVBoxLayout(solver_box)
         solver_layout.setContentsMargins(16, 10, 16, 10)
+
+        # Execution Time Slider (Independent of Weights)
+        time_layout = QHBoxLayout()
+        lbl_time_title = QLabel("**Solver Max Execution Time (Seconds)**: Limits how long the CP-SAT engine searches for a valid schedule.")
+        lbl_time_title.setWordWrap(True)
+        
+        self.time_slider = QSlider(Qt.Orientation.Horizontal)
+        self.time_slider.setRange(30, 300)
+        self.time_slider.setValue(60)
+        self.time_slider.setMinimumWidth(120)
+
+        self.time_val_lbl = QLabel("60")
+        self.time_val_lbl.setStyleSheet("font-weight: bold; color: #1B4332; min-width: 28px;")
+        self.time_val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.time_slider.valueChanged.connect(lambda v: self.time_val_lbl.setText(str(v)))
+
+        time_layout.addWidget(lbl_time_title)
+        time_layout.addWidget(self.time_slider, 1)
+        time_layout.addWidget(self.time_val_lbl)
 
         self.btn_solve = QPushButton("Compile Optimized Schedule")
         self.btn_solve.setObjectName("SolverButton")
         self.btn_solve.setMinimumWidth(300)
 
-        solver_layout.addStretch()
-        solver_layout.addWidget(self.btn_solve)
-        solver_layout.addStretch()
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.btn_solve)
+        btn_layout.addStretch()
+
+        solver_layout.addLayout(time_layout)
+        solver_layout.addLayout(btn_layout)
 
         dash_layout.addStretch()
         dash_layout.addWidget(solver_box)
@@ -449,10 +461,9 @@ class SchedulingStudioMainWindow(QMainWindow):
         self.debug_console.setObjectName("DebugLogConsole")
         self.debug_console.setReadOnly(True)
         self.debug_console.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.debug_console.setVisible(False)   # start hidden
+        self.debug_console.setVisible(False)
         self.debug_layout.addWidget(self.debug_console)
 
-        # Collapsed height = just the group-box title bar (~32 px)
         self.debug_box.setFixedHeight(32)
 
         def _toggle_debug(open_state: bool):
@@ -464,12 +475,12 @@ class SchedulingStudioMainWindow(QMainWindow):
         outer_layout.addWidget(self.debug_box)
         self.statusBar().showMessage("Platform framework targets initialized.")
 
-        self.btn_solve.clicked.connect(lambda: self.run_optimization_triggered.emit())
+        # Passes value dynamically
+        self.btn_solve.clicked.connect(lambda: self.run_optimization_triggered.emit(self.time_slider.value())) 
         self.btn_export.clicked.connect(self.trigger_excel_egress)
         self.btn_import.clicked.connect(self.trigger_excel_ingress)
 
     def setup_logging_bridge(self):
-        # ── FIX: store reference so GC cannot collect the handler ─────
         self._log_handler = QLogSignalHandler()
         self._log_handler.log_emitted.connect(self.append_log_message)
         logging.getLogger().addHandler(self._log_handler)
@@ -564,10 +575,7 @@ class SchedulingStudioMainWindow(QMainWindow):
         if file_path:
             self.import_excel_triggered.emit(file_path)
 
-
-# ====================================================================
-# TAB COMPONENTS
-# ====================================================================
+# ... (The rest of the BaseEntityManagementTab, RoomManagementTab, TeacherManagementTab, GroupManagementTab, and TeacherPreferencesDialog components remain functionally unmodified and perfectly intact) ...
 
 class BaseEntityManagementTab(QWidget):
     create_requested = pyqtSignal(dict)
@@ -605,8 +613,6 @@ class BaseEntityManagementTab(QWidget):
         self.table.setHorizontalHeaderLabels(self.display_columns + ["Actions"])
 
         header = self.table.horizontalHeader()
-        # ── FIX: move setDefaultSectionSize outside the loop; use Stretch
-        #         on the last content column to fill available width ─────
         header.setDefaultSectionSize(120)
         n = len(self.display_columns)
         for i in range(n - 1):
@@ -652,14 +658,8 @@ class BaseEntityManagementTab(QWidget):
         layout.addStretch()
         self.table.setCellWidget(row_idx, len(self.display_columns), widget)
 
-    def show_add_dialog(self):
-        pass
-
-    def show_edit_dialog(self, row_idx: int):
-        pass
-
-
-# ── Room tab ──────────────────────────────────────────────────────────────────
+    def show_add_dialog(self): pass
+    def show_edit_dialog(self, row_idx: int): pass
 
 class RoomManagementTab(BaseEntityManagementTab):
     def __init__(self):
@@ -667,12 +667,11 @@ class RoomManagementTab(BaseEntityManagementTab):
             "Classrooms",
             ["Room ID", "Room Name", "Capacity"],
             ["id", "name", "capacity"])
-        # "Capacity" is short – let "Room Name" stretch instead
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)  # ID
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)            # Name
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)  # Capacity
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)  # Actions
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
 
     def show_add_dialog(self):
         dialog = QDialog(self)
@@ -732,9 +731,6 @@ class RoomManagementTab(BaseEntityManagementTab):
         layout.addRow(btn_save)
         dialog.exec()
 
-
-# ── Teacher tab ───────────────────────────────────────────────────────────────
-
 class TeacherManagementTab(BaseEntityManagementTab):
     preferences_requested = pyqtSignal(int, str, dict)
 
@@ -743,13 +739,12 @@ class TeacherManagementTab(BaseEntityManagementTab):
             "Teaching Staff",
             ["ID", "Full Name", "Weekly Hours Cap", "Skill Matrix"],
             ["id", "name", "max_hours", "skills"])
-        # ── FIX: proper column widths – no empty space on the right ──
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)  # ID
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)        # Name
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)  # Hours
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)            # Skills
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)  # Actions
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
 
     def add_action_buttons(self, row_idx: int):
         widget = QWidget()
@@ -834,9 +829,6 @@ class TeacherManagementTab(BaseEntityManagementTab):
         layout.addRow(btn_save)
         dialog.exec()
 
-
-# ── Groups tab ────────────────────────────────────────────────────────────────
-
 class GroupManagementTab(BaseEntityManagementTab):
     def __init__(self):
         super().__init__(
@@ -847,17 +839,15 @@ class GroupManagementTab(BaseEntityManagementTab):
              "sessions_per_week", "modifiers", "teacher_name"])
         self.teacher_map: Dict[str, str] = {}
 
-        # ── FIX: compact column widths so the table never needs a
-        #         horizontal scrollbar inside the 1250 px minimum window ─
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)  # ID
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)        # Cohort
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)  # Language
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)  # CEFR
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)  # Sessions
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)  # Modifiers
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)            # Teacher
-        header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)  # Actions
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
 
     def set_teacher_map(self, t_map: Dict[str, str]):
         self.teacher_map = t_map
@@ -881,15 +871,23 @@ class GroupManagementTab(BaseEntityManagementTab):
         for row_idx, item in enumerate(enriched_data):
             self.table.insertRow(row_idx)
             
+# Clean up the incoming string (strip spaces and uppercase it)
             level_str = str(item.get("level", "")).strip().upper()
-            bg_color = QColor("#FFFFFF")
+            bg_color = QColor("#FFFFFF") # Default background
 
-            if level_str.startswith("A"):
-                bg_color = QColor("#E6F4EA")
-            elif level_str.startswith("B"):
-                bg_color = QColor("#E8F0FE")
-            elif level_str.startswith("C"):
-                bg_color = QColor("#F3E8FF")
+            # Define strict standard CEFR levels allowed to have background highlights
+            CEFR_PATTERN = re.compile(r"^[ABC][12].*")
+            # Check if it starts with a valid level
+            if CEFR_PATTERN.match(level_str):
+                # We slice the first char because [ABC] is guaranteed by the regex
+                group_prefix = level_str[0]
+                
+                if group_prefix == "A":
+                    bg_color = QColor("#A7FCB4") # Green
+                elif group_prefix == "B":
+                    bg_color = QColor("#A4C5FD") # Blue
+                elif group_prefix == "C":
+                    bg_color = QColor("#D1A9FF") # Purple
 
             cell_brush = QBrush(bg_color)
 
@@ -904,13 +902,10 @@ class GroupManagementTab(BaseEntityManagementTab):
             self.add_action_buttons(row_idx)
         self.table.resizeRowsToContents()
 
-    # ── helpers shared by add/edit dialogs ───────────────────────────
     @staticmethod
     def _make_lang_combo(current_value: str = "") -> QComboBox:
-        """Return a QComboBox pre-populated with every supported language."""
         cb = QComboBox()
         cb.addItems(SUPPORTED_LANGUAGES)
-        # Honour whatever is stored (case-insensitive match)
         for lang in SUPPORTED_LANGUAGES:
             if lang.lower() == current_value.strip().lower():
                 cb.setCurrentText(lang)
@@ -923,7 +918,6 @@ class GroupManagementTab(BaseEntityManagementTab):
         layout = QFormLayout(dialog)
 
         name_in    = QLineEdit()
-        # ── FIX: replaced free-text QLineEdit with a proper dropdown ──
         lang_cb    = self._make_lang_combo()
         level_in   = QLineEdit()
 
@@ -957,7 +951,7 @@ class GroupManagementTab(BaseEntityManagementTab):
         btn_save.clicked.connect(lambda: [
             self.create_requested.emit({
                 "name":             name_in.text(),
-                "language":         lang_cb.currentText(),   # ← from dropdown
+                "language":         lang_cb.currentText(),
                 "level":            level_in.text(),
                 "cefr_numeric":     cefr_in.value(),
                 "sessions_per_week": sess_in.value(),
@@ -978,7 +972,6 @@ class GroupManagementTab(BaseEntityManagementTab):
         layout = QFormLayout(dialog)
 
         name_in  = QLineEdit(group.get("name", ""))
-        # ── FIX: replaced free-text QLineEdit with a proper dropdown ──
         lang_cb  = self._make_lang_combo(group.get("language", ""))
         level_in = QLineEdit(group.get("level", ""))
 
@@ -1020,7 +1013,7 @@ class GroupManagementTab(BaseEntityManagementTab):
         btn_save.clicked.connect(lambda: [
             self.update_requested.emit(row_idx, {
                 "name":             name_in.text(),
-                "language":         lang_cb.currentText(),   # ← from dropdown
+                "language":         lang_cb.currentText(),
                 "level":            level_in.text(),
                 "cefr_numeric":     cefr_in.value(),
                 "sessions_per_week": sess_in.value(),
@@ -1034,16 +1027,11 @@ class GroupManagementTab(BaseEntityManagementTab):
         layout.addRow(btn_save)
         dialog.exec()
 
-
-# ====================================================================
-# PREFERENCES MATRIX DIALOG
-# ====================================================================
-
 class TeacherPreferencesDialog(QDialog):
     def __init__(self, teacher_name: str, current_prefs: dict, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Availability Matrix: {teacher_name}")
-        self.setMinimumSize(800, 500)
+        self.setMinimumSize(850, 550)
         self.current_prefs = current_prefs
         self.days = ["SAT", "SUN", "MON", "TUE", "WED", "THU"]
         self.slots = ["08:30-10:30", "10:30-12:30", "13:30-15:30",
@@ -1052,36 +1040,115 @@ class TeacherPreferencesDialog(QDialog):
         self.init_ui()
 
     def init_ui(self):
-        layout = QVBoxLayout(self)
+        # 1. Base Dialog QSS (Encapsulated Styling)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #F8FAFC;
+            }
+            QWidget#MainCard {
+                background-color: #FFFFFF;
+                border: 1px solid #E2E8F0;
+                border-radius: 8px;
+            }
+            QLabel#DayHeader {
+                font-size: 12px;
+                font-weight: bold;
+                color: #1E293B;
+                padding: 12px 8px;
+            }
+            QLabel#TimeHeader {
+                font-size: 12px;
+                font-weight: bold;
+                color: #64748B;
+                padding: 8px 16px 8px 8px;
+            }
+            QPushButton#SaveBtn {
+                background-color: #0F172A;
+                color: #FFFFFF;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 24px;
+                font-weight: bold;
+                font-size: 13px;
+            }
+            QPushButton#SaveBtn:hover {
+                background-color: #1E293B;
+            }
+            QPushButton#CancelBtn {
+                background-color: #FFFFFF;
+                color: #475569;
+                border: 1px solid #CBD5E1;
+                border-radius: 6px;
+                padding: 8px 24px;
+                font-weight: bold;
+                font-size: 13px;
+            }
+            QPushButton#CancelBtn:hover {
+                background-color: #F1F5F9;
+            }
+        """)
 
-        legend = QLabel(
-            "🟢 Preferred (-10 penalty)  |  ⚪ Neutral (0 penalty)  |  "
-            "🟠 Dislike (+50 penalty)  |  🔴 Unavailable (Hard Ban)")
-        legend.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        legend.setStyleSheet(
-            "padding: 10px; font-weight: bold; background: #F8FAFC; "
-            "border-radius: 6px; margin-bottom: 10px;")
-        layout.addWidget(legend)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(20)
+
+        # 2. Modern Legend (Pill Badges)
+        legend_layout = QHBoxLayout()
+        legend_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        legend_layout.setSpacing(12)
+
+        def create_legend_pill(text: str, bg: str, fg: str, border: str = None) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            bnd_css = f"border: 1px solid {border};" if border else "border: none;"
+            lbl.setStyleSheet(f"""
+                QLabel {{
+                    background-color: {bg};
+                    color: {fg};
+                    font-weight: bold;
+                    font-size: 11.5px;
+                    border-radius: 12px;
+                    padding: 6px 16px;
+                    {bnd_css}
+                }}
+            """)
+            return lbl
+
+        legend_layout.addWidget(create_legend_pill("Preferred", "#DCFCE7", "#15803D", "#86EFAC"))
+        legend_layout.addWidget(create_legend_pill("Neutral", "#FFFFFF", "#475569", "#E2E8F0"))
+        legend_layout.addWidget(create_legend_pill("Dislike", "#FEF3C7", "#B45309", "#FDE68A"))
+        legend_layout.addWidget(create_legend_pill("Unavailable", "#FEE2E2", "#B91C1C", "#FECACA"))
+        
+        layout.addLayout(legend_layout)
+
+        # 3. Main Central Card Container
+        card_widget = QWidget()
+        card_widget.setObjectName("MainCard")
+        card_layout = QVBoxLayout(card_widget)
+        card_layout.setContentsMargins(20, 20, 20, 20)
 
         grid = QGridLayout()
-        grid.setSpacing(8)
+        grid.setSpacing(12)
 
+        # Headers
         for col, day in enumerate(self.days):
             lbl = QLabel(day)
+            lbl.setObjectName("DayHeader")
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setStyleSheet("font-weight: 800; color: #475569;")
             grid.addWidget(lbl, 0, col + 1)
 
         for row, slot in enumerate(self.slots):
             lbl = QLabel(slot)
+            lbl.setObjectName("TimeHeader")
             lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            lbl.setStyleSheet("font-weight: 600; padding-right: 10px;")
             grid.addWidget(lbl, row + 1, 0)
 
+            # Combobox Matrix
             for col, day in enumerate(self.days):
                 cb = QComboBox()
                 cb.addItems(["Neutral", "Preferred", "Dislike", "Unavailable"])
 
+                # Data mapping retrieval
                 if day in self.current_prefs and isinstance(self.current_prefs[day], dict):
                     val = self.current_prefs[day].get(str(row), "neutral")
                 else:
@@ -1089,39 +1156,83 @@ class TeacherPreferencesDialog(QDialog):
 
                 cb.setCurrentText(val.capitalize())
 
-                def update_color(c=cb):
-                    t = c.currentText()
-                    if t == "Preferred":
-                        c.setStyleSheet("background-color: #DCFCE7; font-weight:bold;")
-                    elif t == "Dislike":
-                        c.setStyleSheet("background-color: #FFEDD5; font-weight:bold;")
-                    elif t == "Unavailable":
-                        c.setStyleSheet("background-color: #FEE2E2; color: #9F1239; font-weight:bold;")
-                    else:
-                        c.setStyleSheet("background-color: #FFFFFF;")
-
-                cb.currentTextChanged.connect(lambda _, c=cb: update_color(c))
-                update_color(cb)
+                # Hook dynamic styling
+                cb.currentTextChanged.connect(lambda _, c=cb: self.update_combo_style(c))
+                self.update_combo_style(cb)  # Apply initial state style
 
                 self.combos[f"{day}_{row}"] = cb
                 grid.addWidget(cb, row + 1, col + 1)
 
-        layout.addLayout(grid)
+        card_layout.addLayout(grid)
+        layout.addWidget(card_widget)
         layout.addStretch()
 
+        # 4. Action Buttons Footer
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
 
         btn_cancel = QPushButton("Cancel")
-        btn_cancel.setStyleSheet("background-color: #F1F5F9; color: #475569;")
+        btn_cancel.setObjectName("CancelBtn")
         btn_cancel.clicked.connect(self.reject)
 
         btn_save = QPushButton("Save Availability")
+        btn_save.setObjectName("SaveBtn")
         btn_save.clicked.connect(self.accept)
 
         btn_layout.addWidget(btn_cancel)
         btn_layout.addWidget(btn_save)
         layout.addLayout(btn_layout)
+
+    def update_combo_style(self, combo: QComboBox):
+        """Dynamically builds and applies a custom stylesheet to match the selected tier"""
+        val = combo.currentText()
+        if val == "Preferred":
+            bg, fg, bnd = "#DCFCE7", "#15803D", "#86EFAC"
+        elif val == "Dislike":
+            bg, fg, bnd = "#FEF3C7", "#B45309", "#FDE68A"
+        elif val == "Unavailable":
+            bg, fg, bnd = "#FEE2E2", "#B91C1C", "#FECACA"
+        else:  # Neutral
+            bg, fg, bnd = "#FFFFFF", "#475569", "#CBD5E1"
+
+        combo.setStyleSheet(f"""
+            QComboBox {{
+                background-color: {bg};
+                color: {fg};
+                border: 1px solid {bnd};
+                border-radius: 6px;
+                padding: 6px 10px;
+                font-weight: bold;
+                font-size: 12px;
+            }}
+            QComboBox::drop-down {{
+                subcontrol-origin: padding;
+                subcontrol-position: top right;
+                width: 20px;
+                border-left-width: 0px;
+            }}
+            QComboBox::down-arrow {{
+                image: none;
+                width: 0px;
+                height: 0px;
+                border-left: 4px solid transparent;
+                border-right: 4px solid transparent;
+                border-top: 5px solid {fg};
+                margin-top: 2px;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: #FFFFFF;
+                color: #0F172A;
+                selection-background-color: #F8FAFC;
+                selection-color: #0F172A;
+                border: 1px solid #CBD5E1;
+                border-radius: 4px;
+                outline: none;
+            }}
+            QComboBox QAbstractItemView::item {{
+                padding: 6px;
+            }}
+        """)
 
     def get_preferences(self) -> dict:
         prefs = {}

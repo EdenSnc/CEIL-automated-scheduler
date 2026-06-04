@@ -34,7 +34,7 @@ def bootstrap_application() -> None:
     # Qt's event loop because app.exec() never returns while the loop is running.
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
-    model_instance = ScheduleDataManager(filepath="ceil_data.json")
+    model_instance = ScheduleDataManager(filepath="ceil_scheduler.db")
     view_instance  = SchedulingStudioMainWindow()
     _controller    = SchedulingSystemController(model=model_instance, view=view_instance)
 
