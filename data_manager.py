@@ -6,6 +6,7 @@ import os
 import ast
 import sqlite3
 import threading
+import uuid
 from typing import Any, Dict, List
 import pandas as pd
 import openpyxl
@@ -54,6 +55,7 @@ class ScheduleDataManager:
             "groups": [],
             "rooms": [],
             "schedule": [],
+            "locked_sessions": [], # Added support for Pinned/Makeup Sessions
         }
         self._init_db()
         self.load_from_disk()
@@ -91,7 +93,7 @@ class ScheduleDataManager:
                 for key, val_str in rows:
                     disk_payload[key] = json.loads(val_str)
                 
-                for key in ("metadata", "teachers", "groups", "rooms", "schedule"):
+                for key in ("metadata", "teachers", "groups", "rooms", "schedule", "locked_sessions"):
                     if key in disk_payload:
                         self.data[key] = disk_payload[key]
                 
@@ -110,7 +112,7 @@ class ScheduleDataManager:
         with self.lock:
             try:
                 with self._get_connection() as conn:
-                    for key in ["metadata", "weights", "teachers", "groups", "rooms", "schedule"]:
+                    for key in ["metadata", "weights", "teachers", "groups", "rooms", "schedule", "locked_sessions"]:
                         payload_str = json.dumps(state_snapshot.get(key, []), ensure_ascii=False)
                         conn.execute("""
                             INSERT INTO application_state (key, value) 
@@ -120,6 +122,41 @@ class ScheduleDataManager:
                     conn.commit()
             except Exception as exc:
                 logger.error("Background SQLite save pipeline dropped a write: %s", exc)
+
+    # ==========================================
+    # --- PINNED / MAKEUP SESSION MANAGEMENT ---
+    # ==========================================
+
+    def add_locked_session(self, group_id: str, teacher_id: str, room_id: str, day_idx: int, slot_id: str) -> None:
+        if "locked_sessions" not in self.data:
+            self.data["locked_sessions"] = []
+            
+        session_data = {
+            "id": str(uuid.uuid4()),
+            "group_id": group_id,
+            "teacher_id": teacher_id,
+            "room_id": room_id,
+            "day_idx": day_idx,
+            "slot_id": slot_id
+        }
+        self.data["locked_sessions"].append(session_data)
+        self.save_to_disk()
+
+    def get_locked_sessions(self) -> list:
+        return self.data.get("locked_sessions", [])
+
+    def remove_locked_session(self, session_id: str) -> None:
+        if "locked_sessions" in self.data:
+            original_len = len(self.data["locked_sessions"])
+            self.data["locked_sessions"] = [
+                s for s in self.data["locked_sessions"] if s.get("id") != session_id
+            ]
+            if len(self.data["locked_sessions"]) < original_len:
+                self.save_to_disk()
+
+    # ==========================================
+    # --- STANDARD ENTITY MANAGEMENT ---
+    # ==========================================
 
     def update_weight(self, key: str, value: int) -> None:
         self.data["weights"][key] = value
@@ -168,6 +205,10 @@ class ScheduleDataManager:
             return
         items.pop(index)
         self.save_to_disk()
+
+    # ==========================================
+    # --- EXCEL I/O PIPELINE ---
+    # ==========================================
 
     def export_to_excel(self, filepath: str) -> None:
         try:
@@ -334,7 +375,6 @@ class ScheduleDataManager:
             import logging
             logging.getLogger(__name__).error(f"Excel export failed: {e}")
             raise
-        
             
     def import_master_data_from_excel(self, filepath: str) -> None:
         try:
