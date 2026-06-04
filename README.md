@@ -9,7 +9,7 @@ The **CEIL Scheduler** simplifies the complex task of aligning group schedules, 
 * **Constraint-Based Optimization:** Built on Google OR-Tools to solve complex scheduling logic efficiently.
 * **Responsive PyQt6 UI:** A high-performance GUI allowing for real-time CRUD operations, interactive scheduling views, and visual feedback.
 * **Hardware-Aware Performance:** The engine dynamically calibrates thread allocation based on the host machine's core count, ensuring system stability on both modern workstations and older institutional hardware.
-* **Intuitive Color-Coded Interface:** A clear, flag-inspired, and CEFR-tiered color coding system for instant visual status recognition.
+* **Intuitive Color-Coded Interface:** A clear, flag-inspired, and CEFR-tiered color coding system for instant visual recognition.
 * **Persistent Storage:** Seamless JSON-based data persistence with integrated activity logging.
 
 ## 🛠️ Tech Stack
