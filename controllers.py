@@ -33,6 +33,9 @@ class SchedulingSystemController:
         self.view.group_tab.update_requested.connect(lambda entity_id, data: self.update_entity_handler("groups", entity_id, data))
         self.view.group_tab.delete_requested.connect(lambda entity_id: self.delete_entity_handler("groups", entity_id))
 
+        self.view.group_tab.makeup_requested.connect(self.handle_makeup_dialog_flow)
+
+
         self.view.room_tab.create_requested.connect(lambda data: self.add_entity_handler("rooms", data))
         self.view.room_tab.update_requested.connect(lambda entity_id, data: self.update_entity_handler("rooms", entity_id, data))
         self.view.room_tab.delete_requested.connect(lambda entity_id: self.delete_entity_handler("rooms", entity_id))
@@ -241,3 +244,108 @@ class SchedulingSystemController:
         self.view.status_text.setText("System Error")
         self.view.status_dot.setStyleSheet("color: #9F1239;") 
         QMessageBox.critical(self.view, "Error", f"An unexpected exception occurred inside optimization pipeline thread:\n{error_message}")
+
+    def handle_makeup_dialog_flow(self, index: int) -> None:
+        from ui_components import GroupMakeupManagerDialog
+        from PyQt6.QtWidgets import QDialog, QMessageBox
+        
+        group_item = self.model.data["groups"][index]
+        group_id = group_item.get("id")
+        group_name = group_item.get("name", group_id)
+        target_teacher_id = group_item.get("teacher_id")
+        
+        teacher_prefs = {}
+        teacher_name = "Unassigned"
+        for teacher in self.model.data["teachers"]:
+            if teacher.get("id") == target_teacher_id:
+                teacher_prefs = teacher.get("preferences", {})
+                teacher_name = teacher.get("name", "Unknown")
+                break
+
+        # Instantiate our unified Master Split-Pane UX Dialog
+        dialog = GroupMakeupManagerDialog(
+            group_id=group_id,
+            group_name=group_name,
+            teacher_id=target_teacher_id,
+            teacher_name=teacher_name,
+            rooms=self.model.data["rooms"],
+            current_schedule=self.model.data.get("schedule", []),
+            locked_sessions=self.model.data.get("locked_sessions", []),
+            teacher_prefs=teacher_prefs,
+            parent=self.view
+        )
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            manifest = dialog.get_transaction_manifest()
+            
+            changes_occurred = False
+            
+            # 1. PROCESS BATCH DELETIONS (Scrub from DB & remove optimistic view cards)
+            if manifest["deletions"]:
+                changes_occurred = True
+                active_locks = self.model.data.get("locked_sessions", [])
+                
+                # Identify sessions marked for termination
+                dead_locks = [lock for lock in active_locks if lock.get("id") in manifest["deletions"]]
+                
+                # Re-compile remaining locked sessions list
+                self.model.data["locked_sessions"] = [lock for lock in active_locks if lock.get("id") not in manifest["deletions"]]
+                
+                # Evict matching viewport timeline visual blocks
+                active_schedule = self.model.data.get("schedule", [])
+                for dl in dead_locks:
+                    for item in list(active_schedule):
+                        if (item.get("day") == dl.get("day") and 
+                            item.get("slot") == dl.get("slot") and 
+                            item.get("room") == dl.get("room_name") and 
+                            item.get("group") == dl.get("group_name")):
+                            active_schedule.remove(item)
+                            
+                self.model.data["schedule"] = active_schedule
+                
+                for dl in dead_locks:
+                    self.view.append_log_message(f"[System Activity] Purged locked makeup exception id {dl.get('id')}.")
+
+            # 2. PROCESS BATCH ADDITIONS (Append to DB & render new colored view cards)
+            if manifest["additions"]:
+                changes_occurred = True
+                if "locked_sessions" not in self.model.data:
+                    self.model.data["locked_sessions"] = []
+                if "schedule" not in self.model.data:
+                    self.model.data["schedule"] = []
+                    
+                for add in manifest["additions"]:
+                    # Clean internal tracking fields out before writing transaction records to SQLite
+                    import uuid
+                    db_lock_payload = {
+                        "id": str(uuid.uuid4()),
+                        "group_id": add["group_id"],
+                        "group_name": add["group_name"],
+                        "teacher_id": add["teacher_id"],
+                        "teacher_name": add["teacher_name"],
+                        "room_id": add["room_id"],
+                        "room_name": add["room_name"],
+                        "day": add["day"],
+                        "day_idx": add["day_idx"],
+                        "slot": add["slot"],
+                        "slot_id": add["slot_id"]
+                    }
+                    self.model.data["locked_sessions"].append(db_lock_payload)
+                    
+                    # Push premium visual optimistic card straight onto matrix display
+                    self.model.data["schedule"].append({
+                        "group": add["group_name"],
+                        "teacher": add["teacher_name"],
+                        "room": add["room_name"],
+                        "day": add["day"],
+                        "slot": add["slot"],
+                        "language": group_item.get("language", "English")
+                    })
+                    
+                    self.view.append_log_message(f"[System Activity] Pinned exceptional makeup override for '{add['group_name']}' on {add['day']}.")
+
+            # 3. ATOMIC WRITE & WINDOW REDRAW
+            if changes_occurred:
+                self.model.save_to_disk()
+                self.view.display_schedule(self.model.data["schedule"])
+                QMessageBox.information(self.view, "Schedule Synchronized", "Makeup ledger transformations written successfully.\n\nLocked variables are pinned across future compiler runs.")

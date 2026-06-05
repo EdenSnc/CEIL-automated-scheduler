@@ -127,12 +127,30 @@ def build_model(data: dict, idx: dict, pref_cost: dict, weights: dict) -> tuple:
             for (d, s) in allowed_ts:
                 x[gid][rid][(d, s)] = model.NewBoolVar(f"x__{gid}__{rid}__d{d}s{s}")
 
+    # 1.5 Apply Manual Override Pins
+    pinned_counts = collections.defaultdict(int)
+    locked_coordinates = set() 
+    
+    for locked in data.get("locked_sessions", []):
+        l_gid = locked.get("group_id")
+        l_rid = locked.get("room_id")
+        l_d = int(locked.get("day_idx", 0))
+        l_s = int(locked.get("slot_id", 0))
+        
+        pinned_counts[l_gid] += 1
+        locked_coordinates.add((l_gid, l_d)) # Track days with makeup sessions
+        
+        if l_gid in x and l_rid in x[l_gid] and (l_d, l_s) in x[l_gid][l_rid]:
+            model.Add(x[l_gid][l_rid][(l_d, l_s)] == 1) # BOLTED TO THE FLOOR
+
     # 2. Structural Requirements
     for gid in group_list:
         grp = groups[gid]
         all_x_for_group = [x[gid][rid][(d, s)] for rid in x[gid] for (d, s) in x[gid][rid]]
         if all_x_for_group:
-            model.Add(sum(all_x_for_group) == grp.get("sessions_per_week", 2))
+            # 🟢 Dynamically expand the group's quota to absorb the extra makeup classes
+            target_sessions = grp.get("sessions_per_week", 2) + pinned_counts[gid]
+            model.Add(sum(all_x_for_group) == target_sessions)
 
     for rid in room_list:
         for d in range(num_days):
@@ -338,7 +356,11 @@ def build_model(data: dict, idx: dict, pref_cost: dict, weights: dict) -> tuple:
         for d in range(num_days):
             day_session_vars = [x[gid][rid][(dd, s)] for rid in x[gid] for (dd, s) in x[gid][rid] if dd == d]
             if day_session_vars:
-                model.Add(sum(day_session_vars) <= 1)
+                # 🟢 If user pinned a makeup class on this day, relax the 1-per-day rule to 2
+                if (gid, d) in locked_coordinates:
+                    model.Add(sum(day_session_vars) <= 2)
+                else:
+                    model.Add(sum(day_session_vars) <= 1)
 
     all_penalty_terms = (
         gap_penalty_terms + pref_penalty_terms + load_penalty_terms +

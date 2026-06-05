@@ -658,9 +658,6 @@ class BaseEntityManagementTab(QWidget):
         layout.addStretch()
         self.table.setCellWidget(row_idx, len(self.display_columns), widget)
 
-    def show_add_dialog(self): pass
-    def show_edit_dialog(self, row_idx: int): pass
-
 class RoomManagementTab(BaseEntityManagementTab):
     def __init__(self):
         super().__init__(
@@ -830,6 +827,7 @@ class TeacherManagementTab(BaseEntityManagementTab):
         dialog.exec()
 
 class GroupManagementTab(BaseEntityManagementTab):
+    makeup_requested = pyqtSignal(int)  # <-- Add this signal
     def __init__(self):
         super().__init__(
             "Student Groups",
@@ -848,6 +846,30 @@ class GroupManagementTab(BaseEntityManagementTab):
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
+
+    def add_action_buttons(self, row_idx: int):
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(6)
+
+        # Scoped exclusively here so it never bleeds into other dashboard panels again
+        btn_makeup = QPushButton("Manage Makeup")
+        btn_makeup.setStyleSheet("background-color: #EFF6FF; color: #2563EB; font-weight: bold; border: 1px solid #BFDBFE;")
+        btn_makeup.clicked.connect(lambda _, r=row_idx: self.makeup_requested.emit(r))
+
+        btn_edit = QPushButton("Edit")
+        btn_edit.setStyleSheet("background-color: #F1F5F9; color: #475569;")
+        btn_edit.clicked.connect(lambda _, r=row_idx: self.show_edit_dialog(r))
+
+        btn_delete = QPushButton("Delete")
+        btn_delete.setObjectName("DangerButton")
+        btn_delete.clicked.connect(lambda _, r=row_idx: self.delete_requested.emit(r))
+
+        layout.addWidget(btn_makeup)
+        layout.addWidget(btn_edit)
+        layout.addWidget(btn_delete)
+        self.table.setCellWidget(row_idx, len(self.display_columns), widget)
 
     def set_teacher_map(self, t_map: Dict[str, str]):
         self.teacher_map = t_map
@@ -1242,3 +1264,320 @@ class TeacherPreferencesDialog(QDialog):
                 val = self.combos[f"{day}_{row}"].currentText().lower()
                 prefs[day][str(row)] = val
         return prefs
+
+class GroupMakeupManagerDialog(QDialog):
+    def __init__(self, group_id: str, group_name: str, teacher_id: str, teacher_name: str, rooms: list, current_schedule: list, locked_sessions: list, teacher_prefs: dict = None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Manage Makeup Schedule — {group_name}")
+        self.setMinimumSize(1150, 650)
+        
+        self.group_id = group_id
+        self.group_name = group_name
+        self.teacher_id = teacher_id
+        self.teacher_name = teacher_name
+        self.rooms = rooms
+        
+        import copy
+        self.current_schedule = copy.deepcopy(current_schedule)
+        self.locked_sessions = copy.deepcopy(locked_sessions)
+        self.teacher_prefs = teacher_prefs or {}
+        
+        self.pending_additions = []
+        self.pending_deletions = []
+        
+        self.days = ["SAT", "SUN", "MON", "TUE", "WED", "THU"]
+        self.slots = ["08:30-10:30", "10:30-12:30", "13:30-15:30", "15:30-17:30", "17:30-19:30"]
+        
+        self.init_ui()
+
+    def init_ui(self):
+        self.setStyleSheet("""
+            QDialog { background-color: #F8FAFC; }
+            QWidget#SidebarPane { background-color: #FFFFFF; border-right: 1px solid #E2E8F0; }
+            QWidget#MainCard { background-color: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 8px; }
+            QLabel#HeaderTitle { font-size: 16px; font-weight: 800; color: #0F172A; }
+            QLabel#SectionTitle { font-size: 14px; font-weight: 700; color: #334155; }
+            QLabel#DayHeader { font-size: 11px; font-weight: bold; color: #1E293B; padding: 4px; }
+            QLabel#TimeHeader { font-size: 10px; font-weight: bold; color: #64748B; padding-right: 4px; }
+            QTableWidget { background-color: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 6px; }
+            QHeaderView::section { background-color: #F1F5F9; font-weight: bold; color: #475569; border: none; padding: 6px; font-size: 11px; }
+            QPushButton#SaveBtn { background-color: #2563EB; color: white; border: none; border-radius: 6px; padding: 10px 24px; font-weight: bold; font-size: 13px; }
+            QPushButton#SaveBtn:hover { background-color: #1D4ED8; }
+            QPushButton#CancelBtn { background-color: #FFFFFF; color: #475569; border: 1px solid #CBD5E1; border-radius: 6px; padding: 10px 24px; font-weight: bold; font-size: 13px; }
+            QPushButton#CancelBtn:hover { background-color: #F1F5F9; }
+        """)
+
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # ─── LEFT SIDEBAR: ACTIVE LEDGER ───
+        sidebar = QWidget()
+        sidebar.setObjectName("SidebarPane")
+        sidebar.setFixedWidth(360)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(20, 20, 20, 20)
+        sidebar_layout.setSpacing(12)
+
+        lbl_ledger_title = QLabel("Active Makeup Sessions")
+        lbl_ledger_title.setObjectName("SectionTitle")
+        sidebar_layout.addWidget(lbl_ledger_title)
+
+        self.ledger_table = QTableWidget(0, 3)
+        self.ledger_table.setHorizontalHeaderLabels(["Room", "Time Coordinate", "Action"])
+        self.ledger_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.ledger_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.ledger_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.ledger_table.setShowGrid(False)
+        self.ledger_table.setAlternatingRowColors(True)
+        sidebar_layout.addWidget(self.ledger_table)
+        
+        main_layout.addWidget(sidebar)
+
+        # ─── RIGHT WORKSPACE: HEATMAP FINDER ───
+        workspace = QWidget()
+        workspace_layout = QVBoxLayout(workspace)
+        workspace_layout.setContentsMargins(24, 20, 24, 20)
+        workspace_layout.setSpacing(16)
+
+        banner = QHBoxLayout()
+        info_lbl = QLabel(f"Group: {self.group_name}  |  Instructor: {self.teacher_name}")
+        info_lbl.setObjectName("HeaderTitle")
+        banner.addWidget(info_lbl)
+        workspace_layout.addLayout(banner)
+
+        legend = QHBoxLayout()
+        legend.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        legend.setSpacing(8)
+        def create_pill(text: str, bg: str, fg: str, bnd: str, dashed: bool = False) -> QLabel:
+            lbl = QLabel(text)
+            border_style = "dashed" if dashed else "solid"
+            lbl.setStyleSheet(f"background-color: {bg}; color: {fg}; font-weight: bold; font-size: 10px; border: 2px {border_style} {bnd}; border-radius: 10px; padding: 4px 10px;")
+            return lbl
+        legend.addWidget(create_pill("Preferred", "#EFF6FF", "#1D4ED8", "#BFDBFE"))
+        legend.addWidget(create_pill("Neutral", "#FFFFFF", "#0F172A", "#CBD5E1"))
+        legend.addWidget(create_pill("Dislike", "#F1F5F9", "#64748B", "#E2E8F0"))
+        legend.addWidget(create_pill("Blocked / Busy", "#F8FAFC", "#94A3B8", "#CBD5E1", dashed=True))
+        workspace_layout.addLayout(legend)
+
+        card = QWidget()
+        card.setObjectName("MainCard")
+        self.card_grid_layout = QVBoxLayout(card)
+        self.card_grid_layout.setContentsMargins(16, 16, 16, 16)
+        
+        self.grid_container = QWidget()
+        self.grid = QGridLayout(self.grid_container)
+        self.card_grid_layout.addWidget(self.grid_container)
+        
+        workspace_layout.addWidget(card)
+        workspace_layout.addStretch()
+
+        footer = QHBoxLayout()
+        footer.addStretch()
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.setObjectName("CancelBtn")
+        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_confirm = QPushButton("Save Schedule Changes")
+        self.btn_confirm.setObjectName("SaveBtn")
+        self.btn_confirm.clicked.connect(self.accept)
+        footer.addWidget(self.btn_cancel)
+        footer.addWidget(self.btn_confirm)
+        workspace_layout.addLayout(footer)
+
+        main_layout.addWidget(workspace)
+
+        self.refresh_ledger_list()
+        self.rebuild_heatmap_grid()
+
+    def refresh_ledger_list(self):
+        self.ledger_table.setRowCount(0)
+        for lock in self.locked_sessions:
+            if lock.get("group_id") == self.group_id and lock.get("id") not in self.pending_deletions:
+                self.add_ledger_row(lock, is_pending=False)
+                
+        for addition in self.pending_additions:
+            self.add_ledger_row(addition, is_pending=True)
+
+    # 🟢 UX REFACTOR: Standardizes timestamps cleanly to show clock times (e.g. 08:30)
+    def add_ledger_row(self, session_dict: dict, is_pending: bool):
+        row = self.ledger_table.rowCount()
+        self.ledger_table.insertRow(row)
+        
+        # 1. Resolve human-readable day safely
+        day_str = session_dict.get("day")
+        if "day_idx" in session_dict and isinstance(session_dict["day_idx"], int):
+            day_str = self.days[session_dict["day_idx"]]
+            
+        # 2. Extract starting clock hours directly from the slot label range
+        if "slot_id" in session_dict and isinstance(session_dict["slot_id"], int):
+            slot_range = self.slots[session_dict["slot_id"]]
+        else:
+            slot_range = str(session_dict.get("slot", ""))
+            
+        # Split on hyphen to pull start time (e.g. "08:30-10:30" -> "08:30")
+        start_time = slot_range.split("-")[0] if "-" in slot_range else slot_range
+        room_label = session_dict.get("room_name") or session_dict.get("room_id")
+        
+        r_item = QTableWidgetItem(room_label)
+        c_item = QTableWidgetItem(f"{day_str} : {start_time}")
+        
+        if is_pending:
+            r_item.setBackground(QBrush(QColor("#DCFCE7")))
+            c_item.setBackground(QBrush(QColor("#DCFCE7")))
+            
+        self.ledger_table.setItem(row, 0, r_item)
+        self.ledger_table.setItem(row, 1, c_item)
+
+        action_widget = QWidget()
+        action_layout = QHBoxLayout(action_widget)
+        action_layout.setContentsMargins(2, 2, 2, 2)
+        btn_action = QPushButton("Remove" if not is_pending else "Drop")
+        btn_action.setStyleSheet("background-color: #FEE2E2; color: #B91C1C; font-weight: bold; border-radius: 4px; font-size: 10px; padding: 3px;")
+        
+        btn_action.clicked.connect(lambda _, s=session_dict, p=is_pending: self.handle_session_removal(s, p))
+        action_layout.addWidget(btn_action)
+        self.ledger_table.setCellWidget(row, 2, action_widget)
+
+    def rebuild_heatmap_grid(self):
+        if self.grid:
+            while self.grid.count():
+                item = self.grid.takeAt(0)
+                widget = item.widget()
+                if widget:
+                    widget.deleteLater()
+
+        for col, day in enumerate(self.days):
+            lbl = QLabel(day)
+            lbl.setObjectName("DayHeader")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.grid.addWidget(lbl, 0, col + 1)
+
+        for row, slot in enumerate(self.slots):
+            lbl = QLabel(slot)
+            lbl.setObjectName("TimeHeader")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.grid.addWidget(lbl, row + 1, 0)
+
+            for col, day in enumerate(self.days):
+                pref = self.teacher_prefs.get(day, {}).get(str(row), "neutral").lower() if isinstance(self.teacher_prefs.get(day), dict) else self.teacher_prefs.get(f"{day}_{row}", "neutral").lower()
+                is_avail, reason, vacant_rooms = self.calculate_slot_availability(day, slot)
+                
+                if pref == "unavailable":
+                    is_avail = False
+                    reason = "Unavailable"
+                
+                if not is_avail:
+                    btn = QPushButton(reason)
+                    btn.setEnabled(False)
+                    btn.setStyleSheet("background-color: #F8FAFC; color: #94A3B8; font-size: 10px; font-style: italic; border: 2px dashed #CBD5E1; border-radius: 6px; min-height: 44px;")
+                    self.grid.addWidget(btn, row + 1, col + 1)
+                else:
+                    btn = QPushButton("Available")
+                    btn.setCheckable(True)
+                    if pref == "preferred":
+                        btn.setStyleSheet("background-color: #EFF6FF; color: #1D4ED8; font-weight: bold; border: 2px solid #BFDBFE; border-radius: 6px; min-height: 44px;")
+                    elif pref == "dislike":
+                        btn.setStyleSheet("background-color: #F1F5F9; color: #64748B; font-weight: 500; border: 1px solid #E2E8F0; border-radius: 6px; min-height: 44px;")
+                    else:
+                        btn.setStyleSheet("background-color: #FFFFFF; color: #0F172A; font-weight: bold; border: 1px solid #CBD5E1; border-radius: 6px; min-height: 44px;")
+
+                    btn.clicked.connect(lambda _, b=btn, d=day, r=row, v=vacant_rooms: self.handle_slot_selection(b, d, r, v))
+                    self.grid.addWidget(btn, row + 1, col + 1)
+
+    def calculate_slot_availability(self, day: str, slot_label: str) -> tuple:
+        occupied_rooms = set()
+        for item in self.current_schedule:
+            if item.get("day") == day and item.get("slot") == slot_label:
+                if item.get("group") == self.group_name:
+                    return False, "Group Busy", []
+                if item.get("teacher") == self.teacher_name:
+                    return False, "Teacher Busy", []
+                occupied_rooms.add(item.get("room"))
+                
+        for add in self.pending_additions:
+            if add["day"] == day and add["slot"] == slot_label:
+                occupied_rooms.add(add["room_name"])
+        
+        all_room_names = [rm.get("name", rm.get("id")) for rm in self.rooms]
+        vacant_rooms = [r for r in all_room_names if r not in occupied_rooms]
+        
+        if not vacant_rooms:
+            return False, "Rooms Full", []
+        return True, "Available", vacant_rooms
+
+    def handle_slot_selection(self, selected_btn: QPushButton, day: str, slot_idx: int, vacant_rooms: list):
+        for r in range(1, len(self.slots) + 1):
+            for c in range(1, len(self.days) + 1):
+                widget = self.grid.itemAtPosition(r, c).widget()
+                if isinstance(widget, QPushButton) and widget != selected_btn and widget.isCheckable():
+                    widget.setChecked(False)
+                elif isinstance(widget, QComboBox):
+                    self.rebuild_heatmap_grid()
+                    return
+
+        if selected_btn.isChecked():
+            room_picker = QComboBox()
+            room_picker.addItems(["-- Select Room --"] + vacant_rooms)
+            room_picker.setStyleSheet("""
+                QComboBox { background-color: #EFF6FF; color: #1D4ED8; font-weight: bold; padding: 2px 6px; border: 2px solid #2563EB; border-radius: 6px; min-height: 44px; }
+                QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; width: 20px; border-left: none; }
+                QComboBox::down-arrow { image: none; border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 5px solid #1D4ED8; margin-top: 2px; }
+                QComboBox QAbstractItemView { background-color: #FFFFFF; color: #0F172A; selection-background-color: #EFF6FF; selection-color: #1D4ED8; border: 1px solid #CBD5E1; border-radius: 6px; outline: none; }
+            """)
+            
+            room_picker.currentTextChanged.connect(lambda txt: self.commit_new_addition(day, slot_idx, txt))
+            
+            self.grid.removeWidget(selected_btn)
+            selected_btn.deleteLater()
+            self.grid.addWidget(room_picker, slot_idx + 1, self.days.index(day) + 1)
+
+    def commit_new_addition(self, day: str, slot_idx: int, room_name: str):
+        if not room_name or "--" in room_name:
+            return
+            
+        import uuid
+        new_session = {
+            "id": f"temp_{uuid.uuid4().hex[:8]}",
+            "group_id": self.group_id,
+            "group_name": self.group_name,
+            "teacher_id": self.teacher_id,
+            "teacher_name": self.teacher_name,
+            "room_id": room_name,
+            "room_name": room_name,
+            "day": day,
+            "day_idx": self.days.index(day),
+            "slot": self.slots[slot_idx],
+            "slot_id": slot_idx
+        }
+        
+        self.pending_additions.append(new_session)
+        self.refresh_ledger_list()
+        self.rebuild_heatmap_grid()
+
+    def handle_session_removal(self, session_dict: dict, is_pending: bool):
+        s_id = session_dict.get("id")
+        if is_pending:
+            self.pending_additions = [a for a in self.pending_additions if a.get("id") != s_id]
+        else:
+            self.pending_deletions.append(s_id)
+            day_label = session_dict.get("day")
+            slot_label = session_dict.get("slot")
+            room_label = session_dict.get("room_name") or session_dict.get("room_id")
+            
+            self.current_schedule = [
+                item for item in self.current_schedule if not (
+                    item.get("day") == day_label and 
+                    item.get("slot") == slot_label and 
+                    item.get("room") == room_label and 
+                    item.get("group") == self.group_name
+                )
+            ]
+
+        self.refresh_ledger_list()
+        self.rebuild_heatmap_grid()
+
+    def get_transaction_manifest(self) -> dict:
+        return {
+            "additions": self.pending_additions,
+            "deletions": self.pending_deletions
+        }
