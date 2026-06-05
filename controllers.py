@@ -173,6 +173,7 @@ class SchedulingSystemController:
         self.view.group_tab.setEnabled(False)
         self.view.room_tab.setEnabled(False)
         self.view.btn_import.setEnabled(False)
+        self.view.btn_export.setEnabled(False)
         
         self.view.status_text.setText("Solving matrix...")
         self.view.status_dot.setStyleSheet("color: #D97706;") 
@@ -193,6 +194,7 @@ class SchedulingSystemController:
         self.view.group_tab.setEnabled(True)
         self.view.room_tab.setEnabled(True)
         self.view.btn_import.setEnabled(True)
+        self.view.btn_export.setEnabled(True)
         self.view.tabs.setEnabled(True)
         for btn in self.view.day_buttons:
             btn.setEnabled(True)
@@ -262,12 +264,12 @@ class SchedulingSystemController:
                 teacher_name = teacher.get("name", "Unknown")
                 break
 
-        # Instantiate our unified Master Split-Pane UX Dialog
         dialog = GroupMakeupManagerDialog(
             group_id=group_id,
             group_name=group_name,
             teacher_id=target_teacher_id,
             teacher_name=teacher_name,
+            is_ielts=group_item.get("is_ielts", False), # 🟢 Pass IELTS flag
             rooms=self.model.data["rooms"],
             current_schedule=self.model.data.get("schedule", []),
             locked_sessions=self.model.data.get("locked_sessions", []),
@@ -277,36 +279,41 @@ class SchedulingSystemController:
         
         if dialog.exec() == QDialog.DialogCode.Accepted:
             manifest = dialog.get_transaction_manifest()
-            
             changes_occurred = False
             
-            # 1. PROCESS BATCH DELETIONS (Scrub from DB & remove optimistic view cards)
+            # 1. PROCESS BATCH DELETIONS
             if manifest["deletions"]:
                 changes_occurred = True
                 active_locks = self.model.data.get("locked_sessions", [])
-                
-                # Identify sessions marked for termination
                 dead_locks = [lock for lock in active_locks if lock.get("id") in manifest["deletions"]]
                 
-                # Re-compile remaining locked sessions list
                 self.model.data["locked_sessions"] = [lock for lock in active_locks if lock.get("id") not in manifest["deletions"]]
                 
-                # Evict matching viewport timeline visual blocks
+                # 🟢 BULLETPROOF UI SCRUBBER: Catches both names and raw IDs seamlessly
                 active_schedule = self.model.data.get("schedule", [])
                 for dl in dead_locks:
+                    dl_grp = dl.get("group_name") or dl.get("group_id")
+                    dl_rm = dl.get("room_name") or dl.get("room_id")
+                    
                     for item in list(active_schedule):
-                        if (item.get("day") == dl.get("day") and 
-                            item.get("slot") == dl.get("slot") and 
-                            item.get("room") == dl.get("room_name") and 
-                            item.get("group") == dl.get("group_name")):
+                        grp_match = (item.get("group") == dl_grp or item.get("group") == dl.get("group_id"))
+                        rm_match = (item.get("room") == dl_rm or item.get("room") == dl.get("room_id"))
+                        
+                        if grp_match and rm_match and item.get("day") == dl.get("day") and item.get("slot") == dl.get("slot"):
                             active_schedule.remove(item)
                             
                 self.model.data["schedule"] = active_schedule
                 
                 for dl in dead_locks:
-                    self.view.append_log_message(f"[System Activity] Purged locked makeup exception id {dl.get('id')}.")
+                    g_lbl = dl.get("group_name") or dl.get("group_id", "Unknown")
+                    t_lbl = dl.get("teacher_name") or dl.get("teacher_id", "Unknown")
+                    r_lbl = dl.get("room_name") or dl.get("room_id", "Unknown")
+                    day_lbl = dl.get("day", "Unknown Day")
+                    slot_range = str(dl.get("slot", ""))
+                    start_time = slot_range.split("-")[0] if "-" in slot_range else slot_range
+                    self.view.append_log_message(f"[System Activity] ❌ Unpinned Makeup Exception: Group '{g_lbl}' | Instructor: {t_lbl} | {day_lbl} @ {start_time} | Room: {r_lbl}.")
 
-            # 2. PROCESS BATCH ADDITIONS (Append to DB & render new colored view cards)
+            # 2. PROCESS BATCH ADDITIONS
             if manifest["additions"]:
                 changes_occurred = True
                 if "locked_sessions" not in self.model.data:
@@ -315,7 +322,6 @@ class SchedulingSystemController:
                     self.model.data["schedule"] = []
                     
                 for add in manifest["additions"]:
-                    # Clean internal tracking fields out before writing transaction records to SQLite
                     import uuid
                     db_lock_payload = {
                         "id": str(uuid.uuid4()),
@@ -332,7 +338,6 @@ class SchedulingSystemController:
                     }
                     self.model.data["locked_sessions"].append(db_lock_payload)
                     
-                    # Push premium visual optimistic card straight onto matrix display
                     self.model.data["schedule"].append({
                         "group": add["group_name"],
                         "teacher": add["teacher_name"],
@@ -342,10 +347,11 @@ class SchedulingSystemController:
                         "language": group_item.get("language", "English")
                     })
                     
-                    self.view.append_log_message(f"[System Activity] Pinned exceptional makeup override for '{add['group_name']}' on {add['day']}.")
+                    slot_range = str(add.get("slot", ""))
+                    start_time = slot_range.split("-")[0] if "-" in slot_range else slot_range
+                    self.view.append_log_message(f"[System Activity] 📌 Pinned Exceptional Makeup: Group '{add['group_name']}' | Instructor: {add['teacher_name']} | {add['day']} @ {start_time} | Room: {add['room_name']}.")
 
             # 3. ATOMIC WRITE & WINDOW REDRAW
             if changes_occurred:
                 self.model.save_to_disk()
                 self.view.display_schedule(self.model.data["schedule"])
-                QMessageBox.information(self.view, "Schedule Synchronized", "Makeup ledger transformations written successfully.\n\nLocked variables are pinned across future compiler runs.")

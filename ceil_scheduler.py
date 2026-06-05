@@ -81,24 +81,43 @@ def build_preference_matrix(data: dict, idx: dict) -> dict:
                 pref_cost[tid][(day_i, s)] = PREF_COST.get(raw, 0)   
     return pref_cost
 
-def get_allowed_timeslots(group: dict, idx: dict) -> list:
+def get_allowed_timeslots(group: dict, idx: dict, pinned_slots: set = None) -> list:
     """Calculates all possible open timeslot choices for a group. 
     
-    Unconstrained by default across all active working days, bound 
-    strictly by structural hours and individual teacher availability.
+    Strictly bifurcates Morning (Slots 0-3) and Evening (Slot 4) tracks.
+    Grants absolute override permission to manually pinned makeup sessions.
     """
+    if pinned_slots is None:
+        pinned_slots = set()
+        
     allowed = []
-    # 🟢 Completely bypass group.get("allowed_days"). Open up all system days.
+    is_evening_track = group.get("is_evening", False)
+    
     for di in range(idx["num_days"]):
-        # Maintain allowed_slots so track rules (like Evening Shifts) still bind properly
         for s in group.get("allowed_slots", idx["slots"]):
-            allowed.append((di, s))
+            
+            # 🟢 1. THE SUPREME HUMAN OVERRIDE
+            # If the administrator explicitly booked a makeup session at this coordinate,
+            # allow it immediately regardless of what track the group belongs to.
+            if (di, s) in pinned_slots:
+                allowed.append((di, s))
+                continue
+                
+            # 🟢 2. THE STRICT AI TRACKING RULES
+            if is_evening_track:
+                # Evening groups are strictly confined to 17:30-19:30 (Slot 4)
+                if s == 4:
+                    allowed.append((di, s))
+            else:
+                # Morning/Standard groups are strictly confined to 08:30-17:30 (Slots 0, 1, 2, 3)
+                if s < 4:
+                    allowed.append((di, s))
+                    
     return allowed
 
 def build_model(data: dict, idx: dict, pref_cost: dict, weights: dict) -> tuple:
     model = cp_model.CpModel()
 
-    # Extract dynamic weights locally (SI Spread is removed entirely)
     w_gap = weights.get("W_GAP", 30)
     w_pref = weights.get("W_PREFERENCE", 1)
     w_load = weights.get("W_LOAD_BALANCE", 20)
@@ -114,12 +133,72 @@ def build_model(data: dict, idx: dict, pref_cost: dict, weights: dict) -> tuple:
     normal_rooms = [r for r in room_list if r not in special_rooms]
     group_list, teacher_list = idx["group_list"], idx["teacher_list"]
 
+    # 🟢 STEP 0: DEEP DATA SANITATION (Fixes older corrupted UI saves)
+    for locked in data.get("locked_sessions", []):
+        l_rid = locked.get("room_id")
+        if l_rid not in room_list:
+            for rm in data.get("rooms", []):
+                if rm.get("name") == l_rid:
+                    locked["room_id"] = rm["id"] # Repair DB row retroactively
+                    break
+
+    # 🟢 STEP 1: PRE-PROCESS PINNED SESSIONS
+    pinned_counts = collections.defaultdict(int)
+    group_pinned_slots = collections.defaultdict(set)
+    locked_coordinates = set() 
+    
+    for locked in data.get("locked_sessions", []):
+        l_gid = locked.get("group_id")
+        l_d = int(locked.get("day_idx", 0))
+        l_s = int(locked.get("slot_id", 0))
+        
+        pinned_counts[l_gid] += 1
+        group_pinned_slots[l_gid].add((l_d, l_s))
+        locked_coordinates.add((l_gid, l_d)) 
+
     # 1. Base Variables
     x = {}
     for gid in group_list:
         x[gid] = {}
         grp = groups[gid]
-        allowed_ts = get_allowed_timeslots(grp, idx)
+        
+        pinned_for_grp = group_pinned_slots.get(gid, set())
+        allowed_ts = get_allowed_timeslots(grp, idx, pinned_for_grp)
+        
+        eligible_rooms = list(special_rooms) if grp.get("is_ielts", False) else list(normal_rooms)
+        
+        # 🟢 CRITICAL FIX: Ensure pinned rooms are forcibly added to eligible_rooms so the math variables are always generated!
+        pinned_rooms_for_grp = {l.get("room_id") for l in data.get("locked_sessions", []) if l.get("group_id") == gid}
+        for pr in pinned_rooms_for_grp:
+            if pr in room_list and pr not in eligible_rooms:
+                eligible_rooms.append(pr)
+        
+        for rid in eligible_rooms:
+            x[gid][rid] = {}
+            for (d, s) in allowed_ts:
+                x[gid][rid][(d, s)] = model.NewBoolVar(f"x__{gid}__{rid}__d{d}s{s}")
+
+    # 1.5 Apply Manual Override Pins
+    for locked in data.get("locked_sessions", []):
+        l_gid = locked.get("group_id")
+        l_rid = locked.get("room_id")
+        l_d = int(locked.get("day_idx", 0))
+        l_s = int(locked.get("slot_id", 0))
+        
+        if l_gid in x and l_rid in x[l_gid] and (l_d, l_s) in x[l_gid][l_rid]:
+            model.Add(x[l_gid][l_rid][(l_d, l_s)] == 1) # Bolted down securely
+        else:
+            logger.warning(f"Failed to anchor pin: Group {l_gid} in Room {l_rid} at d{l_d}s{l_s}")
+            
+    # 1. Base Variables
+    x = {}
+    for gid in group_list:
+        x[gid] = {}
+        grp = groups[gid]
+        
+        # Extract specific manual exceptions for this exact group cohort
+        pinned_for_grp = group_pinned_slots.get(gid, set())
+        allowed_ts = get_allowed_timeslots(grp, idx, pinned_for_grp)
         eligible_rooms = list(special_rooms) if grp.get("is_ielts", False) else normal_rooms
         
         for rid in eligible_rooms:
@@ -128,27 +207,21 @@ def build_model(data: dict, idx: dict, pref_cost: dict, weights: dict) -> tuple:
                 x[gid][rid][(d, s)] = model.NewBoolVar(f"x__{gid}__{rid}__d{d}s{s}")
 
     # 1.5 Apply Manual Override Pins
-    pinned_counts = collections.defaultdict(int)
-    locked_coordinates = set() 
-    
     for locked in data.get("locked_sessions", []):
         l_gid = locked.get("group_id")
         l_rid = locked.get("room_id")
         l_d = int(locked.get("day_idx", 0))
         l_s = int(locked.get("slot_id", 0))
         
-        pinned_counts[l_gid] += 1
-        locked_coordinates.add((l_gid, l_d)) # Track days with makeup sessions
-        
         if l_gid in x and l_rid in x[l_gid] and (l_d, l_s) in x[l_gid][l_rid]:
-            model.Add(x[l_gid][l_rid][(l_d, l_s)] == 1) # BOLTED TO THE FLOOR
+            model.Add(x[l_gid][l_rid][(l_d, l_s)] == 1) # Bolted down securely
 
     # 2. Structural Requirements
     for gid in group_list:
         grp = groups[gid]
         all_x_for_group = [x[gid][rid][(d, s)] for rid in x[gid] for (d, s) in x[gid][rid]]
         if all_x_for_group:
-            # 🟢 Dynamically expand the group's quota to absorb the extra makeup classes
+            # Dynamically expand the group's weekly session quota to safely absorb makeup entries
             target_sessions = grp.get("sessions_per_week", 2) + pinned_counts[gid]
             model.Add(sum(all_x_for_group) == target_sessions)
 
@@ -175,13 +248,10 @@ def build_model(data: dict, idx: dict, pref_cost: dict, weights: dict) -> tuple:
                 else:
                     model.Add(sum(teacher_slot_vars) <= 1)
 
-    # 3. Evening Track Restraint
-    for gid in group_list:
-        if groups[gid].get("is_evening", False):
-            for rid in x[gid]:
-                for (d, s) in list(x[gid][rid].keys()):
-                    if s != slots[-1]: # Strictly binding to the final possible shift
-                        model.Add(x[gid][rid][(d, s)] == 0)
+    # 🟢 STEP 2: CLEAN CONFLICTS
+    # Old legacy section 3 evening track restraint loop is fully deleted.
+    # Track segregation rules are handled seamlessly inside get_allowed_timeslots variable generation.
+    pass
 
     # 4. Strict Boolean Arrays for Teacher States
     active = {}
@@ -189,7 +259,6 @@ def build_model(data: dict, idx: dict, pref_cost: dict, weights: dict) -> tuple:
         active[tid] = {}
         for d in range(num_days):
             for s in slots:
-                # Guaranteed BoolVar (Critical for .Not() operator later)
                 v = model.NewBoolVar(f"active__{tid}__d{d}s{s}")
                 teacher_slot_vars = [x[gid][rid][(d, s)] for gid in teacher_groups[tid] for rid in x[gid] if (d, s) in x[gid][rid]]
                 if teacher_slot_vars:
@@ -210,7 +279,6 @@ def build_model(data: dict, idx: dict, pref_cost: dict, weights: dict) -> tuple:
                 g_var = model.NewBoolVar(f"gap__{tid}__d{d}s{si}")
                 gap_vars[tid][(d, si)] = g_var
                 
-                # Algebraic Constraint: No logical implication contradiction.
                 for si_b in range(si):
                     for si_a in range(si + 1, num_slots):
                         model.Add(g_var >= active[tid][(d, slots[si_b])] + active[tid][(d, slots[si_a])] - act - 1)
@@ -345,8 +413,6 @@ def build_model(data: dict, idx: dict, pref_cost: dict, weights: dict) -> tuple:
         num_days_used = model.NewIntVar(0, num_days, f"si_ndays__{gid}")
         model.Add(num_days_used == sum(day_used.values()))
 
-        # Hard Constraint: SI groups must be scheduled on exactly 4 days
-        # (Bounded dynamically in case you accidentally configure a group with less than 4 sessions)
         req_sessions = groups[gid].get("sessions_per_week", 4)
         target_days = 4 if req_sessions >= 4 else req_sessions
         model.Add(num_days_used == target_days)
@@ -356,7 +422,7 @@ def build_model(data: dict, idx: dict, pref_cost: dict, weights: dict) -> tuple:
         for d in range(num_days):
             day_session_vars = [x[gid][rid][(dd, s)] for rid in x[gid] for (dd, s) in x[gid][rid] if dd == d]
             if day_session_vars:
-                # 🟢 If user pinned a makeup class on this day, relax the 1-per-day rule to 2
+                # If a user pinned a manual makeup class on this day, safely relax the limit to 2
                 if (gid, d) in locked_coordinates:
                     model.Add(sum(day_session_vars) <= 2)
                 else:

@@ -1266,7 +1266,8 @@ class TeacherPreferencesDialog(QDialog):
         return prefs
 
 class GroupMakeupManagerDialog(QDialog):
-    def __init__(self, group_id: str, group_name: str, teacher_id: str, teacher_name: str, rooms: list, current_schedule: list, locked_sessions: list, teacher_prefs: dict = None, parent=None):
+    # 🟢 1. Add `is_ielts` to the init signature
+    def __init__(self, group_id: str, group_name: str, teacher_id: str, teacher_name: str, is_ielts: bool, rooms: list, current_schedule: list, locked_sessions: list, teacher_prefs: dict = None, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"Manage Makeup Schedule — {group_name}")
         self.setMinimumSize(1150, 650)
@@ -1275,6 +1276,7 @@ class GroupMakeupManagerDialog(QDialog):
         self.group_name = group_name
         self.teacher_id = teacher_id
         self.teacher_name = teacher_name
+        self.is_ielts = is_ielts  # <-- Store the flag
         self.rooms = rooms
         
         import copy
@@ -1498,7 +1500,16 @@ class GroupMakeupManagerDialog(QDialog):
             if add["day"] == day and add["slot"] == slot_label:
                 occupied_rooms.add(add["room_name"])
         
-        all_room_names = [rm.get("name", rm.get("id")) for rm in self.rooms]
+        # 🟢 2. Filter the UI Dropdown strictly by IELTS rules
+        all_room_names = []
+        for rm in self.rooms:
+            is_special = rm.get("is_special", False)
+            # If group is IELTS, only show special rooms (Salle de prof). Otherwise, only show normal rooms.
+            if self.is_ielts and is_special:
+                all_room_names.append(rm.get("name", rm.get("id")))
+            elif not self.is_ielts and not is_special:
+                all_room_names.append(rm.get("name", rm.get("id")))
+                
         vacant_rooms = [r for r in all_room_names if r not in occupied_rooms]
         
         if not vacant_rooms:

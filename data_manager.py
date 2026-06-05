@@ -212,96 +212,148 @@ class ScheduleDataManager:
 
     def export_to_excel(self, filepath: str) -> None:
         try:
-            from openpyxl.styles import Font, PatternFill, Border, Side
+            from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+            import pandas as pd
+            import copy
             
             with pd.ExcelWriter(filepath, engine='openpyxl') as writer:
                 schedule = self.data.get("schedule", [])
+                
+                # 1. 🟢 VISUAL TIMETABLES: ONE SHEET PER DAY (The Beautiful UI Grids)
                 if schedule:
-                    day_order = {"SAT": 0, "SUN": 1, "MON": 2, "TUE": 3, "WED": 4, "THU": 5}
-                    days = sorted(list(set(item.get("day", "") for item in schedule)), key=lambda d: day_order.get(d.upper(), 99))
-                    slots = sorted(list(set(item.get("slot", "") for item in schedule)))
+                    day_order = ["SAT", "SUN", "MON", "TUE", "WED", "THU"]
+                    lang_colors = {
+                        "english": "C0DAFE", "french": "FB70BF", "spanish": "FFB554",
+                        "italian": "52E084", "german": "907C63", "swedish": "86F5DD",
+                        "japanese": "F9CBCB", "chinese": "F97171", "turkish": "C192F4",
+                        "russian": "6E6EFB"
+                    }
                     
-                    # 1. GENERATE GRID VIEW
-                    grid_df = pd.DataFrame(index=slots, columns=days)
-                    grid_df.fillna("", inplace=True)
-                    
-                    for item in schedule:
-                        d, s, r, g, t = item.get("day", ""), item.get("slot", ""), item.get("room", ""), item.get("group", ""), item.get("teacher", "")
-                        entry = f"[{r}] {g} ({t})"
-                        current = grid_df.at[s, d]
-                        grid_df.at[s, d] = (current + "\n" + entry) if current else entry
-                    
-                    grid_df.to_excel(writer, sheet_name="Grid View")
-                    worksheet = writer.sheets["Grid View"]
-                    for row in worksheet.iter_rows():
-                        for cell in row:
-                            cell.alignment = Alignment(wrap_text=True, vertical='top')
-                    for col in worksheet.columns:
-                        worksheet.column_dimensions[col[0].column_letter].width = 32
+                    rooms = [r.get("name", r.get("id")) for r in self.data.get("rooms", [])]
+                    slots_metadata = self.data.get("metadata", {}).get("slots", [])
+                    slots = [s["label"] for s in slots_metadata] if slots_metadata else ["08:30-10:30", "10:30-12:30", "13:30-15:30", "15:30-17:30", "17:30-19:30"]
 
-                    # 2. GENERATE ROOM VIEW
-                    rooms = sorted(list(set(item.get("room", "") for item in schedule)))
-                    room_cols = []
-                    for r in rooms:
-                        room_cols.extend([f"{r} - Language", f"{r} - Group", f"{r} - Teacher"])
+                    workbook = writer.book
+                    border_side = Side(style="thin", color="CBD5E1")
+                    cell_border = Border(left=border_side, right=border_side, top=border_side, bottom=border_side)
+                    header_font = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
+                    header_fill = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
+                    time_fill = PatternFill(start_color="F1F5F9", end_color="F1F5F9", fill_type="solid")
+
+                    active_days = set(i.get("day", "").upper() for i in schedule)
                     
-                    from collections import defaultdict
-                    row_groups = defaultdict(list)
-                    for item in schedule:
-                        row_groups[(item.get("day", ""), item.get("slot", ""))].append(item)
+                    for day in day_order:
+                        if day not in active_days: continue
                         
-                    rows_list = []
-                    for (d, s), items in sorted(row_groups.items(), key=lambda x: (day_order.get(x[0][0].upper(), 99), x[0][1])):
-                        row_dict = {"Day": d, "Time": s}
-                        for item in items:
-                            r = item.get("room", "")
-                            row_dict[f"{r} - Language"] = item.get("language", "English")
-                            row_dict[f"{r} - Group"] = item.get("group", "")
-                            row_dict[f"{r} - Teacher"] = item.get("teacher", "")
-                        rows_list.append(row_dict)
+                        day_items = [i for i in schedule if i.get("day", "").upper() == day]
+                        ws = workbook.create_sheet(f"{day} Timetable")
                         
-                    pd.DataFrame(rows_list, columns=["Day", "Time"] + room_cols).to_excel(writer, sheet_name="Room View", index=False)
-                    pd.DataFrame(schedule).to_excel(writer, sheet_name="Raw Schedule", index=False)
+                        ws.cell(row=1, column=1, value="Time Slot").font = header_font
+                        ws.cell(row=1, column=1).fill = header_fill
+                        ws.cell(row=1, column=1).border = cell_border
+                        ws.column_dimensions['A'].width = 16
+                        
+                        for col_idx, room in enumerate(rooms, start=2):
+                            cell = ws.cell(row=1, column=col_idx, value=room)
+                            cell.font = header_font
+                            cell.fill = header_fill
+                            cell.border = cell_border
+                            ws.column_dimensions[cell.column_letter].width = 24
+                            
+                        for row_idx, slot in enumerate(slots, start=2):
+                            t_cell = ws.cell(row=row_idx, column=1, value=slot)
+                            t_cell.font = Font(name="Segoe UI", size=10, bold=True, color="475569")
+                            t_cell.fill = time_fill
+                            t_cell.border = cell_border
+                            t_cell.alignment = Alignment(horizontal="center", vertical="center")
+                            ws.row_dimensions[row_idx].height = 45
+                            
+                            for col_idx, room in enumerate(rooms, start=2):
+                                match = next((i for i in day_items if i.get("slot") == slot and i.get("room") == room), None)
+                                cell = ws.cell(row=row_idx, column=col_idx)
+                                cell.border = cell_border
+                                
+                                if match:
+                                    grp = match.get("group", "")
+                                    tch = match.get("teacher", "")
+                                    lang = str(match.get("language", "english")).lower()
+                                    
+                                    cell.value = f"{grp}\n({tch})"
+                                    cell.font = Font(name="Segoe UI", size=10, bold=True, color="0F172A")
+                                    cell.alignment = Alignment(wrap_text=True, horizontal="center", vertical="center")
+                                    
+                                    color_hex = lang_colors.get(lang, "E2E8F0")
+                                    cell.fill = PatternFill(start_color=color_hex, end_color=color_hex, fill_type="solid")
+
+                # 2. 🟢 THE "EVERYTHING TABLE" (Master Filterable Schedule)
+                if schedule:
+                    schedule_df = pd.DataFrame(schedule)
+                    # Reorder columns so the most important data is read left-to-right
+                    preferred_cols = ["day", "slot", "room", "group", "teacher", "language"]
+                    existing_cols = [c for c in preferred_cols if c in schedule_df.columns]
+                    # Add any remaining random columns to the end
+                    existing_cols += [c for c in schedule_df.columns if c not in preferred_cols]
                     
-                # 3. GENERATE MASTER ENTITY VIEWS (Scrub constraints completely)
+                    schedule_df = schedule_df[existing_cols]
+                    # Rename columns to look professional
+                    schedule_df.columns = [str(c).title() for c in schedule_df.columns]
+                    schedule_df.to_excel(writer, sheet_name="Master Schedule", index=False)
+
+                # 3. PROTECT PINNED MAKEUP EXCEPTIONS IN THE WORKBOOK
+                locked = self.data.get("locked_sessions", [])
+                if locked:
+                    pd.DataFrame(locked).to_excel(writer, sheet_name="Pinned Exceptions", index=False)
+
+                # 4. MASTER ENTITY VIEWS
                 teachers_copy = copy.deepcopy(self.data.get("teachers", []))
                 for t in teachers_copy:
-                    t.pop("allowed_days", None)  # 🟢 Drop completely from sheet exports
+                    t.pop("allowed_days", None)
                     if "allowed_slots" in t and isinstance(t["allowed_slots"], list):
                         t["allowed_slots"] = ", ".join(str(s) for s in t["allowed_slots"])
                     if "preferences" in t:
                         t["preferences"] = str(t["preferences"])
-                pd.DataFrame(teachers_copy).to_excel(writer, sheet_name="Teachers", index=False)
+                if teachers_copy:
+                    pd.DataFrame(teachers_copy).to_excel(writer, sheet_name="Teachers", index=False)
 
                 groups_copy = copy.deepcopy(self.data.get("groups", []))
                 for g in groups_copy:
-                    g.pop("allowed_days", None)  # 🟢 Drop completely from sheet exports
+                    g.pop("allowed_days", None)
                     if "allowed_slots" in g and isinstance(g["allowed_slots"], list):
                         g["allowed_slots"] = ", ".join(str(s) for s in g["allowed_slots"])
-                pd.DataFrame(groups_copy).to_excel(writer, sheet_name="Groups", index=False)
+                if groups_copy:
+                    pd.DataFrame(groups_copy).to_excel(writer, sheet_name="Groups", index=False)
                 
-                pd.DataFrame(self.data.get("rooms", [])).to_excel(writer, sheet_name="Rooms", index=False)
+                if self.data.get("rooms"):
+                    pd.DataFrame(self.data.get("rooms", [])).to_excel(writer, sheet_name="Rooms", index=False)
 
-                # --- STRUCTURAL INTERFACE POST-PROCESSING ---
-                workbook = writer.book
+                # Clean up empty default sheet
+                if "Sheet" in writer.book.sheetnames:
+                    del writer.book["Sheet"]
+                    
                 global_font = Font(name="Segoe UI", size=11)
                 header_font = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
                 header_fill = PatternFill(start_color="1E293B", end_color="1E293B", fill_type="solid")
                 empty_fill  = PatternFill(start_color="F8FAFC", end_color="F8FAFC", fill_type="solid")
                 
-                border_side = Side(style="thin", color="CBD5E1")
-                cell_border = Border(left=border_side, right=border_side, top=border_side, bottom=border_side)
-                
-                for sheet_name in workbook.sheetnames:
-                    worksheet = workbook[sheet_name]
-                    for row_idx, row in enumerate(worksheet.iter_rows(), start=1):
+                for sheet_name in writer.book.sheetnames:
+                    if "Timetable" in sheet_name:
+                        continue # Leave our custom visual grids alone
+                    
+                    ws = writer.book[sheet_name]
+                    
+                    # 🟢 Turn on Excel Auto-Filters for the Master Everything Table
+                    if sheet_name == "Master Schedule":
+                        ws.auto_filter.ref = ws.dimensions
+                        ws.freeze_panes = "A2" # Freeze the top header row so it follows you when scrolling down!
+                        
+                    for row_idx, row in enumerate(ws.iter_rows(), start=1):
                         is_header = (row_idx == 1)
                         if is_header:
-                            worksheet.row_dimensions[row_idx].height = 26
+                            ws.row_dimensions[row_idx].height = 26
                         else:
                             has_newline = any(str(cell.value).find('\n') != -1 for cell in row if cell.value)
                             if not has_newline:
-                                worksheet.row_dimensions[row_idx].height = 20
+                                ws.row_dimensions[row_idx].height = 20
                                 
                         for cell in row:
                             if is_header:
@@ -310,19 +362,12 @@ class ScheduleDataManager:
                             else:
                                 cell.font = global_font
                                 cell.fill = empty_fill
-                            cell.border = cell_border
                             
-                    if sheet_name != "Grid View":
-                        for col in worksheet.columns:
-                            max_length = 0
-                            col_letter = col[0].column_letter
-                            for cell in col:
-                                if cell.value:
-                                    lines = str(cell.value).split('\n')
-                                    for line in lines:
-                                        if len(line) > max_length:
-                                            max_length = len(line)
-                            worksheet.column_dimensions[col_letter].width = max(max_length + 4, 12)
+                            if cell.value:
+                                lines = str(cell.value).split('\n')
+                                max_length = max(len(line) for line in lines)
+                                current_width = ws.column_dimensions[cell.column_letter].width or 12
+                                ws.column_dimensions[cell.column_letter].width = max(max_length + 4, current_width)
 
         except Exception as e:
             logger.error(f"Excel export configuration crashed: {e}")
@@ -332,10 +377,20 @@ class ScheduleDataManager:
         try:
             xls = pd.ExcelFile(filepath)
             
-            # 🟢 RECONCILE TIMETABLE ROUND-TRIP OVERRIDES
-            if "Raw Schedule" in xls.sheet_names:
-                sched_df = pd.read_excel(xls, "Raw Schedule")
+            # 🟢 SAFE IMPORT PIPELINE: Looks for our new Master sheet, but falls back to older legacy names automatically
+            target_schedule_sheet = None
+            for legacy_name in ["Master Schedule", "Raw Schedule", "Schedule"]:
+                if legacy_name in xls.sheet_names:
+                    target_schedule_sheet = legacy_name
+                    break
+                    
+            if target_schedule_sheet:
+                sched_df = pd.read_excel(xls, target_schedule_sheet)
                 sched_df = sched_df.where(pd.notnull(sched_df), None)
+                
+                # Normalize columns back to internal lowercase keys (Day, Slot -> day, slot)
+                sched_df.columns = [str(c).lower() for c in sched_df.columns]
+                
                 raw_assignments = sched_df.to_dict(orient="records")
                 
                 clean_assignments = []
@@ -345,7 +400,22 @@ class ScheduleDataManager:
                         clean_assignments.append(clean_a)
                 
                 self.data["schedule"] = clean_assignments
-                logger.info(f"[Import Pipeline] Successfully synchronized {len(clean_assignments)} rows into active schedule collection.")
+                logger.info(f"[Import Pipeline] Successfully synchronized {len(clean_assignments)} rows from '{target_schedule_sheet}'.")
+
+            # RESTORE YOUR LOCKED MAKEUP SESSIONS FROM THE SPREADSHEET
+            if "Pinned Exceptions" in xls.sheet_names:
+                locked_df = pd.read_excel(xls, "Pinned Exceptions")
+                locked_df = locked_df.where(pd.notnull(locked_df), None)
+                raw_locked = locked_df.to_dict(orient="records")
+                
+                clean_locked = []
+                for l in raw_locked:
+                    clean_l = {k: v for k, v in l.items() if v is not None}
+                    if clean_l:
+                        clean_locked.append(clean_l)
+                        
+                self.data["locked_sessions"] = clean_locked
+                logger.info(f"[Import Pipeline] Restored {len(clean_locked)} pinned exceptions from backup.")
 
             def parse_target_sheet(sheet_name):
                 if sheet_name in xls.sheet_names:
@@ -360,7 +430,6 @@ class ScheduleDataManager:
                             raw_language = rec.get("language")
                             clean_r["language"] = "" if raw_language is None else str(raw_language)
                         
-                        # 🛡️ DEFENSIVE GUARD: Ensure allowed_days never pollutes the DB again
                         clean_r.pop("allowed_days", None)
                         
                         if "allowed_slots" in clean_r:
@@ -379,6 +448,7 @@ class ScheduleDataManager:
 
                         if "preferences" in clean_r and isinstance(clean_r["preferences"], str):
                             try:
+                                import ast
                                 clean_r["preferences"] = ast.literal_eval(clean_r["preferences"])
                             except Exception:
                                 pass 
@@ -390,7 +460,6 @@ class ScheduleDataManager:
             groups = parse_target_sheet("Groups")
             rooms = parse_target_sheet("Rooms")
             
-            # Sanitize internal running states
             if teachers:
                 for t in teachers: t.pop("allowed_days", None)
                 self.data["teachers"] = teachers
@@ -403,5 +472,6 @@ class ScheduleDataManager:
             self.save_to_disk()
             logger.info("[Import Pipeline] Complete workbook synchronization routine executed successfully.")
         except Exception as e:
-            logger.error(f"Excel import failed: {e}")
+            import logging
+            logging.getLogger(__name__).error(f"Excel import failed: {e}")
             raise
