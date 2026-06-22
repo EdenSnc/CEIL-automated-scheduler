@@ -177,13 +177,25 @@ class SchedulingSystemController:
         
         self.view.status_text.setText("Solving matrix...")
         self.view.status_dot.setStyleSheet("color: #D97706;") 
-        
-        self.solver_worker = OptimizationSolverWorker(self.model.data)
-        
         self.view.debug_box.setChecked(True)
+        
+        # Prevent starting a new thread if one is somehow still running to avoid memory collisions
+        if self.solver_worker is not None and self.solver_worker.isRunning():
+            self.solver_worker.wait()
+
+        # Initialize the worker, passing the view as the parent
+        self.solver_worker = OptimizationSolverWorker(self.model.data, parent=self.view)
+        
+        # Connect signals to UI update slots mapped to the main thread
         self.solver_worker.log_emitted.connect(self.view.append_log_message)
         self.solver_worker.calculation_finished.connect(self.on_solver_success)
         self.solver_worker.calculation_failed.connect(self.on_solver_failure)
+        
+        # CRITICAL FIX: Schedule the thread object for safe C++ deletion upon completion.
+        # This prevents the "Timers cannot be stopped from another thread" GC crash.
+        self.solver_worker.finished.connect(self.solver_worker.deleteLater)
+        
+        # Start the background execution
         self.solver_worker.start()
 
     def on_solver_success(self, runtime_payload: Dict[str, Any]) -> None:
